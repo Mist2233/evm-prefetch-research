@@ -2,3 +2,4 @@ logs/
 results/
 __pycache__/
 *.csv
+.venv/
