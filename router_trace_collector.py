@@ -69,19 +69,24 @@ class TraceResult:
         }
 
 
-def configure_logging(log_path: Path, verbose: bool = False) -> None:
+def configure_logging(log_path: Path, enable_logging: bool = False, verbose: bool = False) -> None:
     """Configure logging to file only, with optional console output."""
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    # File handler - always detailed
-    file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     
     # Configure root logger
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
-    logger.addHandler(file_handler)
+    
+    if enable_logging:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        # File handler - always detailed
+        file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(file_handler)
+    else:
+        # Add NullHandler to prevent warnings/errors from going to stderr (lastResort)
+        # when no other handlers are present.
+        logger.addHandler(logging.NullHandler())
     
     # Console handler - only for errors or if verbose
     if verbose:
@@ -231,10 +236,11 @@ def parse_args() -> argparse.Namespace:
                         help="Starting block number (decimal or 0x-prefixed hex)")
     parser.add_argument("--end-block", type=parse_block_number, required=True,
                         help="Ending block number (decimal or 0x-prefixed hex)")
-    parser.add_argument("--output", type=Path, required=True,
+    parser.add_argument("--output", type=Path, default=None,
                         help="Output JSON file (will be saved in results/ directory)")
     parser.add_argument("--max-traces", type=int, default=None)
     parser.add_argument("--log-file", type=Path, default=Path("logs/trace.log"))
+    parser.add_argument("--enable-logging", action="store_true", help="Enable logging to file")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Show detailed logs in console (slower)")
     parser.add_argument("--no-progress", action="store_true",
@@ -246,14 +252,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    configure_logging(args.log_file, verbose=args.verbose)
+    configure_logging(args.log_file, enable_logging=args.enable_logging, verbose=args.verbose)
 
     # Ensure output is in results/ directory
     output_path = args.output
-    if not output_path.is_absolute():
-        # If relative path, put it in results/ directory
-        if output_path.parts[0] != "results":
-            output_path = Path("results") / output_path
+    if output_path:
+        if not output_path.is_absolute():
+            # If relative path, put it in results/ directory
+            if output_path.parts[0] != "results":
+                output_path = Path("results") / output_path
     
     # Console output (not logged to file)
     print(f"🔗 Connecting to {args.rpc}...")
@@ -261,8 +268,8 @@ def main() -> int:
     print(f"✅ Connected to chain_id={w3.eth.chain_id}")
     print(f"📍 Blocks: {args.start_block:,} -> {args.end_block:,} ({args.end_block - args.start_block + 1:,} blocks)")
     print(f"🎯 Target: {args.max_traces if args.max_traces else 'unlimited'} traces")
-    print(f"📝 Logs: {args.log_file}")
-    print(f"💾 Output: {output_path}")
+    print(f"📝 Logs: {args.log_file if args.enable_logging else 'Disabled'}")
+    print(f"💾 Output: {output_path if output_path else 'Disabled'}")
     print()
     
     if not HAS_TQDM and not args.no_progress:
@@ -289,20 +296,21 @@ def main() -> int:
     logging.info("Collected %s traces", len(results))
     aggregate = aggregate_counts(results)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "range": {"startBlock": args.start_block, "endBlock": args.end_block},
-                "contracts": TARGET_CONTRACTS,
-                "transactions": [t.to_json() for t in results],
-                "aggregate": aggregate,
-            },
-            f,
-            indent=2,
-        )
-    print(f"💾 Report written to {output_path}")
-    logging.info("Report written to %s", output_path)
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "range": {"startBlock": args.start_block, "endBlock": args.end_block},
+                    "contracts": TARGET_CONTRACTS,
+                    "transactions": [t.to_json() for t in results],
+                    "aggregate": aggregate,
+                },
+                f,
+                indent=2,
+            )
+        print(f"💾 Report written to {output_path}")
+        logging.info("Report written to %s", output_path)
     return 0
 
 

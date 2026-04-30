@@ -5,8 +5,23 @@ set -e  # 遇到错误立即退出
 
 # 配置参数
 RPC_URL="http://127.0.0.1:8545"
-BLOCK_RANGE=${1:-100}  # 扫描的区块数量
-MAX_TRACES=${2:-500}     # 最多收集的交易数量
+BLOCK_RANGE=100
+MAX_TRACES=500
+ENABLE_LOGGING=false
+ENABLE_OUTPUT=false
+
+# 解析参数
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -h|--help) echo "Usage: $0 [--range BLOCK_RANGE] [--max MAX_TRACES] [--with-log] [--with-output]"; exit 0 ;;
+        --range) BLOCK_RANGE="$2"; shift ;;
+        --max) MAX_TRACES="$2"; shift ;;
+        --with-log) ENABLE_LOGGING=true ;;
+        --with-output) ENABLE_OUTPUT=true ;;
+        *) echo "Unknown parameter passed: $1"; exit 1 ;;
+    esac
+    shift
+done
 
 echo "======================================"
 echo "🚀 以太坊交易重放工具"
@@ -36,11 +51,24 @@ echo ""
 
 # 2. 生成输出文件名（带时间戳）
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_FILE="router_stats_${BLOCK_RANGE}blocks_${TIMESTAMP}.json"
-LOG_FILE="logs/trace_${TIMESTAMP}.log"
+OUTPUT_FILE=""
+OUTPUT_ARGS=""
+LOG_ARGS=""
 
-echo "📁 输出文件: $OUTPUT_FILE"
-echo "📝 日志文件: $LOG_FILE"
+if [ "$ENABLE_OUTPUT" = true ]; then
+    OUTPUT_FILE="router_stats_${BLOCK_RANGE}blocks_${TIMESTAMP}.json"
+    OUTPUT_ARGS="--output $OUTPUT_FILE"
+    echo "📁 输出文件: $OUTPUT_FILE"
+else
+    echo "📁 输出文件: (已禁用)"
+fi
+
+if [ "$ENABLE_LOGGING" = true ]; then
+    LOG_ARGS="--enable-logging"
+    echo "📝 日志: (已启用)"
+else
+    echo "📝 日志: (已禁用)"
+fi
 echo ""
 
 # 3. 运行重放脚本
@@ -52,24 +80,26 @@ python3 router_trace_collector.py \
   --rpc $RPC_URL \
   --start-block $START_BLOCK \
   --end-block $CURRENT_BLOCK \
-  --output $OUTPUT_FILE \
   --max-traces $MAX_TRACES \
-  --log-file $LOG_FILE
+  $OUTPUT_ARGS \
+  $LOG_ARGS
 
-# 4. 输出路径处理（自动添加 results/ 前缀）
-if [[ "$OUTPUT_FILE" != /* ]] && [[ "$OUTPUT_FILE" != results/* ]]; then
-  OUTPUT_FILE="results/$OUTPUT_FILE"
-fi
+# 4. 后续处理仅在启用输出时进行
+if [ "$ENABLE_OUTPUT" = true ]; then
+    # 自动添加 results/ 前缀
+    if [[ "$OUTPUT_FILE" != /* ]] && [[ "$OUTPUT_FILE" != results/* ]]; then
+      OUTPUT_FILE="results/$OUTPUT_FILE"
+    fi
 
-# 5. 检查结果文件是否生成
-if [ -f "$OUTPUT_FILE" ]; then
-    echo ""
-    echo "======================================"
-    echo "✅ 重放完成！"
-    echo "======================================"
-    
-    # 使用 Python 快速分析结果
-    python3 -c "
+    # 5. 检查结果文件是否生成
+    if [ -f "$OUTPUT_FILE" ]; then
+        echo ""
+        echo "======================================"
+        echo "✅ 重放完成！"
+        echo "======================================"
+        
+        # 使用 Python 快速分析结果
+        python3 -c "
 import json
 with open('$OUTPUT_FILE') as f:
     data = json.load(f)
@@ -92,11 +122,16 @@ for contract, aggregate in sorted(data['aggregate'].items(),
         print(f'    - SLOAD:  {sload:>6,} (平均 {sload/tx_count:>5.1f}/tx)')
         print(f'    - SSTORE: {sstore:>6,} (平均 {sstore/tx_count:>5.1f}/tx)')
 " 2>/dev/null || echo "⚠️  无法解析结果文件"
-    
-    echo ""
-    echo "📂 查看完整结果: cat $OUTPUT_FILE | jq ."
-    echo "📜 查看日志: tail -f $LOG_FILE"
+        
+        echo ""
+        echo "📂 查看完整结果: cat $OUTPUT_FILE | jq ."
+    else
+        echo "❌ 重放失败，未生成输出文件"
+        exit 1
+    fi
 else
-    echo "❌ 重放失败，未生成输出文件"
-    exit 1
+    echo ""
+    echo "======================================"
+    echo "✅ 重放完成 (未生成报告)"
+    echo "======================================"
 fi

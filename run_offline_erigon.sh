@@ -5,6 +5,7 @@
 # 记得在 workspace 下执行: ln -sfn erigon-research erigon-target
 ERIGON_BIN="$HOME/workspace/erigon-target/build/bin/erigon"
 
+
 # 数据目录路径 (1.7T 数据所在位置)
 DATA_DIR="$HOME/blockchain-data/mainnet"
 
@@ -30,6 +31,10 @@ fi
   --prune.mode=archive \
   --maxpeers 0 \
   --nodiscover \
+  --externalcl \
+  --caplin.checkpoint-sync.disable \
+  --no-downloader \
   --http \
   --http.api=eth,debug,net,web3,trace \
-  --http.port $RPC_PORT
+  --verbosity 3 \
+  --http.port $RPC_PORT | tee erigon_output.log

@@ -1,2 +1,9 @@
 requests
 tqdm
+lightgbm
+scikit-learn
+pandas
+numpy
+joblib
+matplotlib
+openpyxl
