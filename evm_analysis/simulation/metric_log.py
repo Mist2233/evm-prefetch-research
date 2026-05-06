@@ -37,6 +37,8 @@ class RunSummary:
     prefetch_timely_total: int = 0
     prefetch_late_total: int = 0
     prefetch_queue_wait_us_total: float = 0.0
+    predict_overhead_us: float = 0.0
+    e2e_elapsed_s: float = 0.0
 
     @property
     def recall(self) -> float:
@@ -61,10 +63,29 @@ class RunSummary:
     def avg_cost_per_access_us(self) -> float:
         return self.total_cost_us / self.n_true_accesses if self.n_true_accesses else 0.0
 
+    @property
+    def avg_predict_overhead_per_tx_us(self) -> float:
+        return self.predict_overhead_us / self.n_tx if self.n_tx else 0.0
+
     def speedup_vs(self, baseline: "RunSummary") -> float:
         if self.total_cost_us <= 0:
             return float("inf")
         return baseline.total_cost_us / self.total_cost_us
+
+    @property
+    def e2e_cost_proxy_us(self) -> float:
+        """
+        端到端近似代价（用于净收益对比）：
+        存储仿真代价 + 预测器真实开销。
+        """
+        return self.total_cost_us + self.predict_overhead_us
+
+    def net_speedup_vs(self, baseline: "RunSummary") -> float:
+        current = self.e2e_cost_proxy_us
+        base = baseline.e2e_cost_proxy_us
+        if current <= 0:
+            return float("inf")
+        return base / current
 
     @property
     def prefetch_timely_rate(self) -> float:
@@ -101,6 +122,10 @@ class RunSummary:
             "prefetch_late_total": self.prefetch_late_total,
             "prefetch_timely_rate": round(self.prefetch_timely_rate, 6),
             "prefetch_queue_wait_us_total": round(self.prefetch_queue_wait_us_total, 4),
+            "predict_overhead_us": round(self.predict_overhead_us, 4),
+            "avg_predict_overhead_per_tx_us": round(self.avg_predict_overhead_per_tx_us, 4),
+            "e2e_cost_proxy_us": round(self.e2e_cost_proxy_us, 4),
+            "e2e_elapsed_s": round(self.e2e_elapsed_s, 6),
         }
 
 
@@ -145,3 +170,9 @@ class MetricLog:
 
     def summary(self) -> RunSummary:
         return self._summary
+
+    def add_predict_overhead_us(self, overhead_us: float) -> None:
+        self._summary.predict_overhead_us += overhead_us
+
+    def set_elapsed_s(self, elapsed_s: float) -> None:
+        self._summary.e2e_elapsed_s = elapsed_s

@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import hashlib
 from pathlib import Path
+import pandas as pd
 
 _MODEL_CACHE: dict[str, dict] = {}
 
@@ -25,6 +27,10 @@ class BasePrefetcher(ABC):
     def predict(self, tx: dict) -> list[str]:
         """给定一条交易记录，返回预测的 slot 列表（去重顺序不保证）。"""
         ...
+
+    def predict_batch(self, txs: list[dict]) -> list[list[str]]:
+        """批量预测默认退化为逐条预测，子类可重写以做向量化推理。"""
+        return [self.predict(tx) for tx in txs]
 
 
 # ── E0：无预取基线 ──────────────────────────────────────────────────────────
@@ -70,6 +76,16 @@ class HybridPrefetcher(BasePrefetcher):
       - 未知 label 值使用 encoder 第 0 类作为 fallback
     """
     name = "hybrid"
+    _FIELD_MAP = (
+        ("f_to", "to"),
+        ("f_code_hash", "code_hash"),
+        ("f_selector", "selector"),
+        ("f_input_param_1", "input_param_1"),
+        ("f_input_param_2", "input_param_2"),
+        ("f_input_param_3", "input_param_3"),
+        ("f_from", "from"),
+        ("f_value", "value"),
+    )
 
     def __init__(self, saved: dict):
         self.fast_path_dict: dict = saved["fast_path_dict"]
@@ -94,17 +110,7 @@ class HybridPrefetcher(BasePrefetcher):
     def _encode_row(self, tx: dict) -> dict:
         """将一条交易记录编码为模型所需的特征字典。"""
         encoded = {}
-        field_map = {
-            "f_to": "to",
-            "f_code_hash": "code_hash",
-            "f_selector": "selector",
-            "f_input_param_1": "input_param_1",
-            "f_input_param_2": "input_param_2",
-            "f_input_param_3": "input_param_3",
-            "f_from": "from",
-            "f_value": "value",
-        }
-        for feat_col, raw_col in field_map.items():
+        for feat_col, raw_col in self._FIELD_MAP:
             col_name = raw_col  # encoder key
             if col_name not in self.encoders:
                 encoded[feat_col] = 0
@@ -118,38 +124,123 @@ class HybridPrefetcher(BasePrefetcher):
         return encoded
 
     def predict(self, tx: dict) -> list[str]:
-        key = (tx.get("to", ""), tx.get("selector", ""))
+        return self.predict_batch([tx])[0]
 
-        # 快路径：O(1) 查表
-        if key in self.fast_path_dict:
-            return self.fast_path_dict[key]
+    def predict_batch(self, txs: list[dict]) -> list[list[str]]:
+        if not txs:
+            return []
 
-        # 慢路径：LightGBM 推理
-        import pandas as pd
-        encoded = self._encode_row(tx)
-        X = pd.DataFrame([{col: encoded.get(col, 0) for col in self.feature_cols}])
-        pred_sparse = self.model.predict(X)
-        result = self.mlb.inverse_transform(pred_sparse)
-        return list(result[0]) if result else []
+        predictions: list[list[str]] = [[] for _ in txs]
+        slow_indices: list[int] = []
+        slow_rows: list[dict] = []
+
+        for idx, tx in enumerate(txs):
+            key = (tx.get("to", ""), tx.get("selector", ""))
+            fast = self.fast_path_dict.get(key)
+            if fast is not None:
+                predictions[idx] = fast
+                continue
+            slow_indices.append(idx)
+            encoded = self._encode_row(tx)
+            slow_rows.append({col: encoded.get(col, 0) for col in self.feature_cols})
+
+        if slow_rows:
+            X = pd.DataFrame(slow_rows, columns=self.feature_cols)
+            pred_sparse = self.model.predict(X)
+            slow_preds = self.mlb.inverse_transform(pred_sparse)
+            for idx, pred in zip(slow_indices, slow_preds):
+                predictions[idx] = list(pred)
+
+        return predictions
+
+
+class HybridGatedPrefetcher(HybridPrefetcher):
+    """
+    Hybrid 的低风险变体：
+    - fast-path 始终保留；
+    - slow-path 仅按 gate_rate 触发，降低模型推理开销。
+    """
+    name = "hybrid_gated"
+
+    def __init__(self, saved: dict, gate_rate: float = 0.1):
+        super().__init__(saved)
+        if gate_rate < 0.0 or gate_rate > 1.0:
+            raise ValueError(f"gate_rate 必须在 [0, 1]，当前值: {gate_rate}")
+        self.gate_rate = float(gate_rate)
+
+    def _should_run_slow_path(self, tx: dict) -> bool:
+        """
+        使用稳定哈希做采样门控，保证同一交易特征在多次实验中决策一致。
+        """
+        if self.gate_rate >= 1.0:
+            return True
+        if self.gate_rate <= 0.0:
+            return False
+        seed = "|".join(
+            [
+                str(tx.get("to", "")),
+                str(tx.get("selector", "")),
+                str(tx.get("input_param_1", "")),
+                str(tx.get("input_param_2", "")),
+                str(tx.get("input_param_3", "")),
+                str(tx.get("value", "")),
+            ]
+        )
+        h = hashlib.md5(seed.encode("utf-8")).hexdigest()
+        sample = int(h[:8], 16) / 0xFFFFFFFF
+        return sample < self.gate_rate
+
+    def predict_batch(self, txs: list[dict]) -> list[list[str]]:
+        if not txs:
+            return []
+
+        predictions: list[list[str]] = [[] for _ in txs]
+        slow_indices: list[int] = []
+        slow_rows: list[dict] = []
+
+        for idx, tx in enumerate(txs):
+            key = (tx.get("to", ""), tx.get("selector", ""))
+            fast = self.fast_path_dict.get(key)
+            if fast is not None:
+                predictions[idx] = fast
+                continue
+            if not self._should_run_slow_path(tx):
+                continue
+            slow_indices.append(idx)
+            encoded = self._encode_row(tx)
+            slow_rows.append({col: encoded.get(col, 0) for col in self.feature_cols})
+
+        if slow_rows:
+            X = pd.DataFrame(slow_rows, columns=self.feature_cols)
+            pred_sparse = self.model.predict(X)
+            slow_preds = self.mlb.inverse_transform(pred_sparse)
+            for idx, pred in zip(slow_indices, slow_preds):
+                predictions[idx] = list(pred)
+
+        return predictions
 
 
 # ── 工厂函数 ─────────────────────────────────────────────────────────────────
 
-def make_prefetcher(name: str, model_path: str | None = None) -> BasePrefetcher:
+def make_prefetcher(
+    name: str,
+    model_path: str | None = None,
+    hybrid_gate_rate: float = 0.1,
+) -> BasePrefetcher:
     """
     按名称构建预取器。name 对应 CLI --prefetcher 参数：
-      none / oracle / rule / hybrid
-    rule 和 hybrid 都需要 model_path 指向 evm_model_hybrid_v1.pkl。
+      none / oracle / rule / hybrid / hybrid_gated
+    rule/hybrid/hybrid_gated 都需要 model_path 指向 evm_model_hybrid_v1.pkl。
     """
     if name == "none":
         return NoPrefetcher()
     if name == "oracle":
         return OraclePrefetcher()
-    if name in ("rule", "hybrid"):
+    if name in ("rule", "hybrid", "hybrid_gated"):
         if not model_path or not Path(model_path).exists():
             raise FileNotFoundError(
                 f"--model 路径不存在或未指定（当前值：{model_path!r}），"
-                "rule/hybrid 预取器需要 evm_model_hybrid_v1.pkl"
+                "rule/hybrid/hybrid_gated 预取器需要 evm_model_hybrid_v1.pkl"
             )
         saved = _MODEL_CACHE.get(model_path)
         if saved is None:
@@ -158,5 +249,7 @@ def make_prefetcher(name: str, model_path: str | None = None) -> BasePrefetcher:
             _MODEL_CACHE[model_path] = saved
         if name == "rule":
             return RuleBasePrefetcher(saved["fast_path_dict"])
+        if name == "hybrid_gated":
+            return HybridGatedPrefetcher(saved, gate_rate=hybrid_gate_rate)
         return HybridPrefetcher(saved)
-    raise ValueError(f"未知 prefetcher 名称：{name!r}，可选：none/oracle/rule/hybrid")
+    raise ValueError(f"未知 prefetcher 名称：{name!r}，可选：none/oracle/rule/hybrid/hybrid_gated")

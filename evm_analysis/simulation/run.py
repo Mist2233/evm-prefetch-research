@@ -86,8 +86,16 @@ def run_simulation(
         sim.reset_block()
         log.new_block()
 
-        for tx in block_txs:
-            predicted = prefetcher.predict(tx)
+        pred_t0 = time.perf_counter()
+        batch_predictions = prefetcher.predict_batch(block_txs)
+        pred_elapsed_us = (time.perf_counter() - pred_t0) * 1e6
+        log.add_predict_overhead_us(pred_elapsed_us)
+        if len(batch_predictions) != len(block_txs):
+            raise RuntimeError(
+                f"{prefetcher.name}.predict_batch 返回长度不匹配："
+                f"{len(batch_predictions)} != {len(block_txs)}"
+            )
+        for tx, predicted in zip(block_txs, batch_predictions):
             result = sim.process_tx(tx, predicted)
             log.record(result)
             if verbose and progress_every_txs > 0 and (log.summary().n_tx % progress_every_txs == 0):
@@ -95,7 +103,9 @@ def run_simulation(
                 elapsed = time.time() - t0
                 print(
                     f"  [{prefetcher.name}] tx={s.n_tx} blocks={s.n_blocks} "
-                    f"cost={s.total_cost_us/1e6:.3f}s elapsed={elapsed:.1f}s"
+                    f"cost={s.total_cost_us/1e6:.3f}s "
+                    f"pred={s.predict_overhead_us/1e6:.3f}s "
+                    f"elapsed={elapsed:.1f}s"
                 )
 
         if verbose and (block_idx + 1) % 100 == 0:
@@ -105,9 +115,11 @@ def run_simulation(
                 f"  [{prefetcher.name}] 块 {block_idx+1} | "
                 f"累计交易 {s.n_tx} | "
                 f"代价 {s.total_cost_us/1e6:.3f} s | "
+                f"预测开销 {s.predict_overhead_us/1e6:.3f} s | "
                 f"耗时 {elapsed:.1f}s"
             )
 
+    log.set_elapsed_s(time.time() - t0)
     return log.summary()
 
 
@@ -135,13 +147,21 @@ def print_summary(s: RunSummary, baseline: RunSummary | None = None) -> None:
     print(f"  预取及时命中率  : {s.prefetch_timely_rate:.4f}")
     print(f"  预取排队等待    : {s.prefetch_queue_wait_us_total:.2f} µs")
     print(f"  总仿真代价      : {s.total_cost_us/1e6:.4f} s  ({s.total_cost_us:.0f} µs)")
+    print(f"  预测器开销      : {s.predict_overhead_us/1e6:.4f} s  ({s.predict_overhead_us:.0f} µs)")
+    print(f"  端到端近似代价  : {s.e2e_cost_proxy_us/1e6:.4f} s  ({s.e2e_cost_proxy_us:.0f} µs)")
+    print(f"  程序真实耗时    : {s.e2e_elapsed_s:.4f} s")
     print(f"  平均每笔交易    : {s.avg_cost_per_tx_us:.4f} µs")
     print(f"  平均每次访问    : {s.avg_cost_per_access_us:.6f} µs")
+    print(f"  平均每笔预测开销: {s.avg_predict_overhead_per_tx_us:.4f} µs")
     if baseline is not None and baseline is not s:
         speedup = s.speedup_vs(baseline)
+        net_speedup = s.net_speedup_vs(baseline)
         saved_us = baseline.total_cost_us - s.total_cost_us
+        net_gain_us = saved_us - s.predict_overhead_us
         print(f"  相对基线加速比  : {speedup:.4f}x")
         print(f"  节省代价        : {saved_us:.0f} µs  ({saved_us/baseline.total_cost_us*100:.2f}%)")
+        print(f"  净收益(net)     : {net_gain_us:.0f} µs")
+        print(f"  净口径加速比    : {net_speedup:.4f}x")
 
 
 def save_results(summaries: list[RunSummary], output_path: str, baseline: RunSummary) -> None:
@@ -150,7 +170,10 @@ def save_results(summaries: list[RunSummary], output_path: str, baseline: RunSum
     for s in summaries:
         d = s.as_dict()
         d["speedup_vs_baseline"] = round(s.speedup_vs(baseline), 6)
+        d["speedup_net_vs_baseline"] = round(s.net_speedup_vs(baseline), 6)
         d["saved_cost_us"] = round(baseline.total_cost_us - s.total_cost_us, 4)
+        d["storage_gain_us"] = d["saved_cost_us"]
+        d["net_gain_us"] = round(d["saved_cost_us"] - s.predict_overhead_us, 4)
         rows.append(d)
 
     with open(output_path, "w", newline="") as f:
@@ -252,6 +275,7 @@ def run_sensitivity(
     tx_index_field: str,
     output_path: str,
     max_param_cases: int | None = None,
+    hybrid_gate_rate: float = 0.1,
 ) -> None:
     print("\n开始敏感性分析（固定 prefetcher=hybrid，扫描 t_hit/t_miss）...")
     rows = []
@@ -259,13 +283,13 @@ def run_sensitivity(
     for label, t_hit_ns, t_miss_us in params:
         print(f"\n  参数组合: {label}  t_hit={t_hit_ns}ns  t_miss={t_miss_us}µs")
         baseline = run_simulation(
-            make_prefetcher("none"),
+            make_prefetcher("none", hybrid_gate_rate=hybrid_gate_rate),
             data_path, data_mode, block_size, max_blocks, max_txs,
             block_number_field, tx_index_field,
             t_hit_ns, t_miss_us, verbose=False,
         )
         hybrid = run_simulation(
-            make_prefetcher("hybrid", model_path),
+            make_prefetcher("hybrid", model_path, hybrid_gate_rate),
             data_path, data_mode, block_size, max_blocks, max_txs,
             block_number_field, tx_index_field,
             t_hit_ns, t_miss_us, verbose=False,
@@ -309,10 +333,11 @@ def run_parallel_sensitivity(
     latencies_us: list[float],
     concurrencies: list[int],
     output_path: str,
+    hybrid_gate_rate: float = 0.1,
 ) -> None:
     print("\n开始并行预取敏感性分析（fixed prefetcher=hybrid）...")
     baseline = run_simulation(
-        make_prefetcher("none"),
+        make_prefetcher("none", hybrid_gate_rate=hybrid_gate_rate),
         data_path, data_mode, block_size, max_blocks, max_txs,
         block_number_field, tx_index_field,
         t_hit_ns, t_miss_us, verbose=False,
@@ -321,7 +346,7 @@ def run_parallel_sensitivity(
     for latency_us in latencies_us:
         for concurrency in concurrencies:
             s = run_simulation(
-                make_prefetcher("hybrid", model_path),
+                make_prefetcher("hybrid", model_path, hybrid_gate_rate),
                 data_path, data_mode, block_size, max_blocks, max_txs,
                 block_number_field, tx_index_field,
                 t_hit_ns, t_miss_us,
@@ -368,9 +393,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", default=DEFAULT_MODEL, help="Hybrid 模型 pkl 路径（rule/hybrid 必须）")
     p.add_argument(
         "--prefetcher",
-        choices=["none", "oracle", "rule", "hybrid"],
+        choices=["none", "oracle", "rule", "hybrid", "hybrid_gated"],
         default="none",
         help="单次运行时使用的预取器（--all 时忽略此参数）",
+    )
+    p.add_argument(
+        "--hybrid-gate-rate",
+        type=float,
+        default=0.1,
+        help="hybrid_gated 的 slow-path 触发比例（0~1）",
     )
     p.add_argument("--all", action="store_true", help="依次运行 E0/E1/E2/E3 四组实验并输出对比")
     p.add_argument("--sensitivity", action="store_true", help="运行敏感性分析（扫描 t_hit/t_miss）")
@@ -449,6 +480,7 @@ def main() -> None:
             tx_index_field=args.tx_index_field,
             output_path=str(Path(args.output_dir) / "sensitivity_table.csv"),
             max_param_cases=args.sensitivity_cases,
+            hybrid_gate_rate=args.hybrid_gate_rate,
         )
         return
 
@@ -467,6 +499,7 @@ def main() -> None:
             latencies_us=args.parallel_latencies,
             concurrencies=args.parallel_concurrencies,
             output_path=str(Path(args.output_dir) / "parallel_prefetch_sensitivity.csv"),
+            hybrid_gate_rate=args.hybrid_gate_rate,
         )
         return
 
@@ -474,7 +507,7 @@ def main() -> None:
         rows = []
         for mode in ("pseudo_block", "real_block"):
             baseline = run_simulation(
-                make_prefetcher("none"),
+                make_prefetcher("none", hybrid_gate_rate=args.hybrid_gate_rate),
                 args.data, mode, args.block_size, args.max_blocks, args.max_txs,
                 args.block_number_field, args.tx_index_field,
                 args.t_hit_ns, args.t_miss_us,
@@ -486,7 +519,7 @@ def main() -> None:
                 verbose=verbose,
             )
             hybrid = run_simulation(
-                make_prefetcher("hybrid", args.model),
+                make_prefetcher("hybrid", args.model, args.hybrid_gate_rate),
                 args.data, mode, args.block_size, args.max_blocks, args.max_txs,
                 args.block_number_field, args.tx_index_field,
                 args.t_hit_ns, args.t_miss_us,
@@ -524,12 +557,13 @@ def main() -> None:
             ("oracle", None),
             ("rule",   args.model),
             ("hybrid", args.model),
+            ("hybrid_gated", args.model),
         ]
         summaries: list[RunSummary] = []
         for pname, mpath in experiments:
             print(f"\n{'─'*55}")
             print(f"  运行 {pname.upper()} ...")
-            pf = make_prefetcher(pname, mpath)
+            pf = make_prefetcher(pname, mpath, args.hybrid_gate_rate)
             s = run_simulation(
                 pf, args.data, args.data_mode, args.block_size, args.max_blocks,
                 args.max_txs,
@@ -578,7 +612,7 @@ def main() -> None:
 
     # ── 单次运行 ───────────────────────────────────────────────────────────
     print(f"运行单次仿真：prefetcher={args.prefetcher}")
-    pf = make_prefetcher(args.prefetcher, args.model)
+    pf = make_prefetcher(args.prefetcher, args.model, args.hybrid_gate_rate)
     s = run_simulation(
         pf, args.data, args.data_mode, args.block_size, args.max_blocks, args.max_txs,
         args.block_number_field, args.tx_index_field,
