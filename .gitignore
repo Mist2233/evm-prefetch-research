@@ -9,3 +9,5 @@ __pycache__/
 *.json
 erigon-target
 *.xlsx
+
+.claude/
