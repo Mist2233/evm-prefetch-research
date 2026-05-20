@@ -32,6 +32,7 @@ class TxResult:
     prefetch_timely: int = 0
     prefetch_late: int = 0
     prefetch_queue_wait_us: float = 0.0
+    tx_exec_us: float = 0.0
 
 
 class CacheSim:
@@ -43,6 +44,8 @@ class CacheSim:
         t_prefetch_us: float = 0.0,
         prefetch_concurrency: int = 1,
         queue_delay_us: float = 0.0,
+        tx_exec_us_per_slot: float = 0.0,
+        tx_exec_us_base: float = 0.0,
     ):
         self.t_hit_us = t_hit_ns / 1000.0
         self.t_miss_us = t_miss_us
@@ -50,6 +53,8 @@ class CacheSim:
         self.t_prefetch_us = t_prefetch_us
         self.prefetch_concurrency = prefetch_concurrency
         self.queue_delay_us = queue_delay_us
+        self.tx_exec_us_per_slot = tx_exec_us_per_slot
+        self.tx_exec_us_base = tx_exec_us_base
 
         self._cache: set[str] = set()
         self._baseline_cache: set[str] = set()
@@ -148,8 +153,10 @@ class CacheSim:
 
             self._clock_us += access_cost
 
-        # 更新“无预取基准缓存”：只由真实访问驱动
+        # 更新”无预取基准缓存”：只由真实访问驱动
         self._baseline_cache.update(true_unique)
+
+        tx_exec_us = len(true_slots) * self.tx_exec_us_per_slot + self.tx_exec_us_base
 
         return TxResult(
             n_true_unique=len(true_unique),
@@ -165,4 +172,5 @@ class CacheSim:
             prefetch_timely=prefetch_timely,
             prefetch_late=prefetch_late,
             prefetch_queue_wait_us=queue_wait_us,
+            tx_exec_us=tx_exec_us,
         )

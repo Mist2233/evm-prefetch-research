@@ -52,6 +52,8 @@ def run_simulation(
     t_prefetch_us: float = 0.0,
     prefetch_concurrency: int = 1,
     queue_delay_us: float = 0.0,
+    tx_exec_us_per_slot: float = 0.0,
+    tx_exec_us_base: float = 0.0,
     progress_every_txs: int = 500,
     verbose: bool = True,
 ) -> RunSummary:
@@ -71,6 +73,8 @@ def run_simulation(
         t_prefetch_us=t_prefetch_us,
         prefetch_concurrency=prefetch_concurrency,
         queue_delay_us=queue_delay_us,
+        tx_exec_us_per_slot=tx_exec_us_per_slot,
+        tx_exec_us_base=tx_exec_us_base,
     )
     log = MetricLog(
         prefetcher_name=prefetcher.name,
@@ -276,6 +280,11 @@ def run_sensitivity(
     output_path: str,
     max_param_cases: int | None = None,
     hybrid_gate_rate: float = 0.1,
+    use_gpu: bool = False,
+    gpu_device_id: int = 0,
+    slow_batch_size: int = 1024,
+    tx_exec_us_per_slot: float = 0.0,
+    tx_exec_us_base: float = 0.0,
 ) -> None:
     print("\n开始敏感性分析（固定 prefetcher=hybrid，扫描 t_hit/t_miss）...")
     rows = []
@@ -283,16 +292,33 @@ def run_sensitivity(
     for label, t_hit_ns, t_miss_us in params:
         print(f"\n  参数组合: {label}  t_hit={t_hit_ns}ns  t_miss={t_miss_us}µs")
         baseline = run_simulation(
-            make_prefetcher("none", hybrid_gate_rate=hybrid_gate_rate),
+            make_prefetcher(
+                "none",
+                hybrid_gate_rate=hybrid_gate_rate,
+                use_gpu=use_gpu,
+                gpu_device_id=gpu_device_id,
+                slow_batch_size=slow_batch_size,
+            ),
             data_path, data_mode, block_size, max_blocks, max_txs,
             block_number_field, tx_index_field,
             t_hit_ns, t_miss_us, verbose=False,
+            tx_exec_us_per_slot=tx_exec_us_per_slot,
+            tx_exec_us_base=tx_exec_us_base,
         )
         hybrid = run_simulation(
-            make_prefetcher("hybrid", model_path, hybrid_gate_rate),
+            make_prefetcher(
+                "hybrid",
+                model_path,
+                hybrid_gate_rate,
+                use_gpu,
+                gpu_device_id,
+                slow_batch_size,
+            ),
             data_path, data_mode, block_size, max_blocks, max_txs,
             block_number_field, tx_index_field,
             t_hit_ns, t_miss_us, verbose=False,
+            tx_exec_us_per_slot=tx_exec_us_per_slot,
+            tx_exec_us_base=tx_exec_us_base,
         )
         row = {
             "param_label": label,
@@ -334,19 +360,39 @@ def run_parallel_sensitivity(
     concurrencies: list[int],
     output_path: str,
     hybrid_gate_rate: float = 0.1,
+    use_gpu: bool = False,
+    gpu_device_id: int = 0,
+    slow_batch_size: int = 1024,
+    tx_exec_us_per_slot: float = 0.0,
+    tx_exec_us_base: float = 0.0,
 ) -> None:
     print("\n开始并行预取敏感性分析（fixed prefetcher=hybrid）...")
     baseline = run_simulation(
-        make_prefetcher("none", hybrid_gate_rate=hybrid_gate_rate),
+        make_prefetcher(
+            "none",
+            hybrid_gate_rate=hybrid_gate_rate,
+            use_gpu=use_gpu,
+            gpu_device_id=gpu_device_id,
+            slow_batch_size=slow_batch_size,
+        ),
         data_path, data_mode, block_size, max_blocks, max_txs,
         block_number_field, tx_index_field,
         t_hit_ns, t_miss_us, verbose=False,
+        tx_exec_us_per_slot=tx_exec_us_per_slot,
+        tx_exec_us_base=tx_exec_us_base,
     )
     rows = []
     for latency_us in latencies_us:
         for concurrency in concurrencies:
             s = run_simulation(
-                make_prefetcher("hybrid", model_path, hybrid_gate_rate),
+                make_prefetcher(
+                    "hybrid",
+                    model_path,
+                    hybrid_gate_rate,
+                    use_gpu,
+                    gpu_device_id,
+                    slow_batch_size,
+                ),
                 data_path, data_mode, block_size, max_blocks, max_txs,
                 block_number_field, tx_index_field,
                 t_hit_ns, t_miss_us,
@@ -355,6 +401,8 @@ def run_parallel_sensitivity(
                 prefetch_concurrency=concurrency,
                 queue_delay_us=0.0,
                 verbose=False,
+                tx_exec_us_per_slot=tx_exec_us_per_slot,
+                tx_exec_us_base=tx_exec_us_base,
             )
             rows.append(
                 {
@@ -382,6 +430,115 @@ def run_parallel_sensitivity(
     print(f"\n并行预取敏感性结果已保存至: {output_path}")
 
 
+def run_alpha_sweep(
+    data_path: str,
+    model_path: str,
+    data_mode: str,
+    block_size: int,
+    max_blocks: int | None,
+    max_txs: int | None,
+    block_number_field: str,
+    tx_index_field: str,
+    t_hit_ns: float,
+    t_miss_us: float,
+    prefetch_timing: str,
+    t_prefetch_us: float,
+    prefetch_concurrency: int,
+    queue_delay_us: float,
+    tx_exec_us_per_slot: float,
+    tx_exec_us_base: float,
+    alphas: list[float],
+    output_path: str,
+    hybrid_gate_rate: float = 0.1,
+    use_gpu: bool = False,
+    gpu_device_id: int = 0,
+    slow_batch_size: int = 1024,
+    progress_every_txs: int = 500,
+    verbose: bool = True,
+) -> None:
+    print("\n开始 Alpha 执行时间覆盖敏感性分析...")
+    print(f"  tx_exec_us_per_slot={tx_exec_us_per_slot}  tx_exec_us_base={tx_exec_us_base}")
+    print(f"  alphas={alphas}")
+
+    baseline = run_simulation(
+        make_prefetcher(
+            "none",
+            hybrid_gate_rate=hybrid_gate_rate,
+            use_gpu=use_gpu,
+            gpu_device_id=gpu_device_id,
+            slow_batch_size=slow_batch_size,
+        ),
+        data_path, data_mode, block_size, max_blocks, max_txs,
+        block_number_field, tx_index_field,
+        t_hit_ns, t_miss_us,
+        prefetch_timing=prefetch_timing,
+        t_prefetch_us=t_prefetch_us,
+        prefetch_concurrency=prefetch_concurrency,
+        queue_delay_us=queue_delay_us,
+        tx_exec_us_per_slot=tx_exec_us_per_slot,
+        tx_exec_us_base=tx_exec_us_base,
+        progress_every_txs=progress_every_txs,
+        verbose=verbose,
+    )
+    hybrid = run_simulation(
+        make_prefetcher(
+            "hybrid",
+            model_path,
+            hybrid_gate_rate,
+            use_gpu,
+            gpu_device_id,
+            slow_batch_size,
+        ),
+        data_path, data_mode, block_size, max_blocks, max_txs,
+        block_number_field, tx_index_field,
+        t_hit_ns, t_miss_us,
+        prefetch_timing=prefetch_timing,
+        t_prefetch_us=t_prefetch_us,
+        prefetch_concurrency=prefetch_concurrency,
+        queue_delay_us=queue_delay_us,
+        tx_exec_us_per_slot=tx_exec_us_per_slot,
+        tx_exec_us_base=tx_exec_us_base,
+        progress_every_txs=progress_every_txs,
+        verbose=verbose,
+    )
+
+    storage_gain_us = hybrid.storage_gain_vs(baseline)
+    tx_exec_us_total = hybrid.tx_exec_us_total
+    raw_pred_overhead = hybrid.predict_overhead_us
+
+    rows = []
+    for alpha in alphas:
+        effective_overhead = hybrid.effective_pred_overhead_us(alpha)
+        net_gain = hybrid.net_gain_with_overlap_us(baseline, alpha)
+        speedup = hybrid.speedup_overlap_vs(baseline, alpha)
+        rows.append({
+            "alpha": alpha,
+            "tx_exec_us_total": round(tx_exec_us_total, 2),
+            "raw_pred_overhead_us": round(raw_pred_overhead, 2),
+            "effective_pred_overhead_us": round(effective_overhead, 2),
+            "storage_gain_us": round(storage_gain_us, 2),
+            "net_gain_us": round(net_gain, 2),
+            "speedup_overlap_vs_baseline": round(speedup, 6),
+            "net_positive": "Y" if net_gain > 0 else "N",
+            "baseline_cost_us": round(baseline.total_cost_us, 2),
+            "hybrid_cost_us": round(hybrid.total_cost_us, 2),
+            "recall": round(hybrid.recall, 4),
+            "precision": round(hybrid.precision, 4),
+        })
+        print(
+            f"  alpha={alpha:.2f}  eff_overhead={effective_overhead/1e6:.3f}s  "
+            f"net_gain={net_gain/1e6:.3f}s  "
+            f"speedup={speedup:.4f}x  {'✓' if net_gain > 0 else '✗'}"
+        )
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"\nAlpha 覆盖敏感性结果已保存至: {output_path}")
+
+
 # ── CLI 参数解析 ──────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -403,9 +560,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.1,
         help="hybrid_gated 的 slow-path 触发比例（0~1）",
     )
+    p.add_argument("--use-gpu", action="store_true", help="对 hybrid/hybrid_gated 尝试启用 GPU 推理")
+    p.add_argument("--gpu-device-id", type=int, default=0, help="GPU 设备 ID（--use-gpu 时生效）")
+    p.add_argument("--slow-batch-size", type=int, default=1024, help="hybrid 慢路径分片批大小")
     p.add_argument("--all", action="store_true", help="依次运行 E0/E1/E2/E3 四组实验并输出对比")
     p.add_argument("--sensitivity", action="store_true", help="运行敏感性分析（扫描 t_hit/t_miss）")
     p.add_argument("--parallel-sensitivity", action="store_true", help="运行并行预取敏感性分析")
+    p.add_argument("--alpha-sweep", action="store_true", help="运行 alpha 执行时间覆盖敏感性分析")
+    p.add_argument("--offline-delta", action="store_true", help="运行离线增量管道（hybrid → fast-path 补充）")
+    p.add_argument("--delta-split-ratio", type=float, default=0.8, help="Window A/B 切分比例")
+    p.add_argument("--delta-min-support", type=int, default=2, help="候选 slot 最小支持次数")
+    p.add_argument("--delta-max-slots-per-key", type=int, default=None, help="每键最多新增 slot 数")
     p.add_argument("--sensitivity-cases", type=int, default=None, help="敏感性参数组合上限（快速抽样）")
     p.add_argument(
         "--parallel-latencies",
@@ -445,6 +610,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--t-prefetch-us", type=float, default=0.0, help="单槽预取服务时间（µs）")
     p.add_argument("--prefetch-concurrency", type=int, default=1, help="预取并发 worker 数")
     p.add_argument("--queue-delay-us", type=float, default=0.0, help="预取入队固定延迟（µs）")
+    p.add_argument("--tx-exec-us-base", type=float, default=0.0, help="每笔交易执行时间代理基础值（µs）")
+    p.add_argument("--tx-exec-us-per-slot", type=float, default=0.0, help="每 slot 访问执行时间代理增量（µs）")
+    p.add_argument(
+        "--alphas",
+        type=float,
+        nargs="*",
+        default=[0.0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0],
+        help="alpha 覆盖比例列表（alpha sweep 用）",
+    )
     p.add_argument(
         "--output-dir", default=DEFAULT_OUTPUT_DIR, help="CSV 输出目录"
     )
@@ -481,6 +655,11 @@ def main() -> None:
             output_path=str(Path(args.output_dir) / "sensitivity_table.csv"),
             max_param_cases=args.sensitivity_cases,
             hybrid_gate_rate=args.hybrid_gate_rate,
+            use_gpu=args.use_gpu,
+            gpu_device_id=args.gpu_device_id,
+            slow_batch_size=args.slow_batch_size,
+            tx_exec_us_per_slot=args.tx_exec_us_per_slot,
+            tx_exec_us_base=args.tx_exec_us_base,
         )
         return
 
@@ -500,6 +679,64 @@ def main() -> None:
             concurrencies=args.parallel_concurrencies,
             output_path=str(Path(args.output_dir) / "parallel_prefetch_sensitivity.csv"),
             hybrid_gate_rate=args.hybrid_gate_rate,
+            use_gpu=args.use_gpu,
+            gpu_device_id=args.gpu_device_id,
+            slow_batch_size=args.slow_batch_size,
+            tx_exec_us_per_slot=args.tx_exec_us_per_slot,
+            tx_exec_us_base=args.tx_exec_us_base,
+        )
+        return
+
+    if args.alpha_sweep:
+        run_alpha_sweep(
+            data_path=args.data,
+            model_path=args.model,
+            data_mode=args.data_mode,
+            block_size=args.block_size,
+            max_blocks=args.max_blocks,
+            max_txs=args.max_txs,
+            block_number_field=args.block_number_field,
+            tx_index_field=args.tx_index_field,
+            t_hit_ns=args.t_hit_ns,
+            t_miss_us=args.t_miss_us,
+            prefetch_timing=args.prefetch_timing,
+            t_prefetch_us=args.t_prefetch_us,
+            prefetch_concurrency=args.prefetch_concurrency,
+            queue_delay_us=args.queue_delay_us,
+            tx_exec_us_per_slot=args.tx_exec_us_per_slot,
+            tx_exec_us_base=args.tx_exec_us_base,
+            alphas=args.alphas,
+            output_path=str(Path(args.output_dir) / "alpha_sweep_overlap.csv"),
+            hybrid_gate_rate=args.hybrid_gate_rate,
+            use_gpu=args.use_gpu,
+            gpu_device_id=args.gpu_device_id,
+            slow_batch_size=args.slow_batch_size,
+            progress_every_txs=args.progress_every_txs,
+            verbose=verbose,
+        )
+        return
+
+    if args.offline_delta:
+        from simulation.offline_delta import run_offline_delta_pipeline
+        run_offline_delta_pipeline(
+            data_path=args.data,
+            model_path=args.model,
+            data_mode=args.data_mode,
+            block_size=args.block_size,
+            max_txs=args.max_txs,
+            max_blocks=args.max_blocks,
+            block_number_field=args.block_number_field,
+            tx_index_field=args.tx_index_field,
+            t_hit_ns=args.t_hit_ns,
+            t_miss_us=args.t_miss_us,
+            split_ratio=args.delta_split_ratio,
+            min_support=args.delta_min_support,
+            max_new_slots_per_key=args.delta_max_slots_per_key,
+            output_dir=args.output_dir,
+            use_gpu=args.use_gpu,
+            gpu_device_id=args.gpu_device_id,
+            slow_batch_size=args.slow_batch_size,
+            quiet=args.quiet,
         )
         return
 
@@ -507,7 +744,13 @@ def main() -> None:
         rows = []
         for mode in ("pseudo_block", "real_block"):
             baseline = run_simulation(
-                make_prefetcher("none", hybrid_gate_rate=args.hybrid_gate_rate),
+                make_prefetcher(
+                    "none",
+                    hybrid_gate_rate=args.hybrid_gate_rate,
+                    use_gpu=args.use_gpu,
+                    gpu_device_id=args.gpu_device_id,
+                    slow_batch_size=args.slow_batch_size,
+                ),
                 args.data, mode, args.block_size, args.max_blocks, args.max_txs,
                 args.block_number_field, args.tx_index_field,
                 args.t_hit_ns, args.t_miss_us,
@@ -515,11 +758,20 @@ def main() -> None:
                 t_prefetch_us=args.t_prefetch_us,
                 prefetch_concurrency=args.prefetch_concurrency,
                 queue_delay_us=args.queue_delay_us,
+                tx_exec_us_per_slot=args.tx_exec_us_per_slot,
+                tx_exec_us_base=args.tx_exec_us_base,
                 progress_every_txs=args.progress_every_txs,
                 verbose=verbose,
             )
             hybrid = run_simulation(
-                make_prefetcher("hybrid", args.model, args.hybrid_gate_rate),
+                make_prefetcher(
+                    "hybrid",
+                    args.model,
+                    args.hybrid_gate_rate,
+                    args.use_gpu,
+                    args.gpu_device_id,
+                    args.slow_batch_size,
+                ),
                 args.data, mode, args.block_size, args.max_blocks, args.max_txs,
                 args.block_number_field, args.tx_index_field,
                 args.t_hit_ns, args.t_miss_us,
@@ -527,6 +779,8 @@ def main() -> None:
                 t_prefetch_us=args.t_prefetch_us,
                 prefetch_concurrency=args.prefetch_concurrency,
                 queue_delay_us=args.queue_delay_us,
+                tx_exec_us_per_slot=args.tx_exec_us_per_slot,
+                tx_exec_us_base=args.tx_exec_us_base,
                 progress_every_txs=args.progress_every_txs,
                 verbose=verbose,
             )
@@ -563,7 +817,14 @@ def main() -> None:
         for pname, mpath in experiments:
             print(f"\n{'─'*55}")
             print(f"  运行 {pname.upper()} ...")
-            pf = make_prefetcher(pname, mpath, args.hybrid_gate_rate)
+            pf = make_prefetcher(
+                pname,
+                mpath,
+                args.hybrid_gate_rate,
+                args.use_gpu,
+                args.gpu_device_id,
+                args.slow_batch_size,
+            )
             s = run_simulation(
                 pf, args.data, args.data_mode, args.block_size, args.max_blocks,
                 args.max_txs,
@@ -573,6 +834,8 @@ def main() -> None:
                 t_prefetch_us=args.t_prefetch_us,
                 prefetch_concurrency=args.prefetch_concurrency,
                 queue_delay_us=args.queue_delay_us,
+                tx_exec_us_per_slot=args.tx_exec_us_per_slot,
+                tx_exec_us_base=args.tx_exec_us_base,
                 progress_every_txs=args.progress_every_txs,
                 verbose=verbose,
             )
@@ -612,7 +875,14 @@ def main() -> None:
 
     # ── 单次运行 ───────────────────────────────────────────────────────────
     print(f"运行单次仿真：prefetcher={args.prefetcher}")
-    pf = make_prefetcher(args.prefetcher, args.model, args.hybrid_gate_rate)
+    pf = make_prefetcher(
+        args.prefetcher,
+        args.model,
+        args.hybrid_gate_rate,
+        args.use_gpu,
+        args.gpu_device_id,
+        args.slow_batch_size,
+    )
     s = run_simulation(
         pf, args.data, args.data_mode, args.block_size, args.max_blocks, args.max_txs,
         args.block_number_field, args.tx_index_field,
@@ -621,6 +891,8 @@ def main() -> None:
         t_prefetch_us=args.t_prefetch_us,
         prefetch_concurrency=args.prefetch_concurrency,
         queue_delay_us=args.queue_delay_us,
+        tx_exec_us_per_slot=args.tx_exec_us_per_slot,
+        tx_exec_us_base=args.tx_exec_us_base,
         progress_every_txs=args.progress_every_txs,
         verbose=verbose,
     )

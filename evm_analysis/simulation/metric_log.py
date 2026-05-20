@@ -38,6 +38,7 @@ class RunSummary:
     prefetch_late_total: int = 0
     prefetch_queue_wait_us_total: float = 0.0
     predict_overhead_us: float = 0.0
+    tx_exec_us_total: float = 0.0
     e2e_elapsed_s: float = 0.0
 
     @property
@@ -87,6 +88,27 @@ class RunSummary:
             return float("inf")
         return base / current
 
+    def storage_gain_vs(self, baseline: "RunSummary") -> float:
+        """存储代价节省量（µs）。"""
+        return baseline.total_cost_us - self.total_cost_us
+
+    def effective_pred_overhead_us(self, alpha: float) -> float:
+        """扣除执行时间覆盖后的有效预测开销（µs）。"""
+        return max(0.0, self.predict_overhead_us - alpha * self.tx_exec_us_total)
+
+    def net_gain_with_overlap_us(self, baseline: "RunSummary", alpha: float) -> float:
+        """计入 alpha 覆盖后的净收益（µs）。"""
+        return self.storage_gain_vs(baseline) - self.effective_pred_overhead_us(alpha)
+
+    def speedup_overlap_vs(self, baseline: "RunSummary", alpha: float) -> float:
+        """计入 alpha 覆盖后的净口径加速比。"""
+        effective_overhead = self.effective_pred_overhead_us(alpha)
+        current = self.total_cost_us + effective_overhead
+        base = baseline.e2e_cost_proxy_us
+        if current <= 0:
+            return float("inf")
+        return base / current
+
     @property
     def prefetch_timely_rate(self) -> float:
         return (
@@ -122,6 +144,7 @@ class RunSummary:
             "prefetch_late_total": self.prefetch_late_total,
             "prefetch_timely_rate": round(self.prefetch_timely_rate, 6),
             "prefetch_queue_wait_us_total": round(self.prefetch_queue_wait_us_total, 4),
+            "tx_exec_us_total": round(self.tx_exec_us_total, 2),
             "predict_overhead_us": round(self.predict_overhead_us, 4),
             "avg_predict_overhead_per_tx_us": round(self.avg_predict_overhead_per_tx_us, 4),
             "e2e_cost_proxy_us": round(self.e2e_cost_proxy_us, 4),
@@ -167,6 +190,7 @@ class MetricLog:
         s.prefetch_timely_total += result.prefetch_timely
         s.prefetch_late_total += result.prefetch_late
         s.prefetch_queue_wait_us_total += result.prefetch_queue_wait_us
+        s.tx_exec_us_total += result.tx_exec_us
 
     def summary(self) -> RunSummary:
         return self._summary

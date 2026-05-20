@@ -15,6 +15,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import hashlib
 from pathlib import Path
+import numpy as np
 import pandas as pd
 
 _MODEL_CACHE: dict[str, dict] = {}
@@ -87,12 +88,22 @@ class HybridPrefetcher(BasePrefetcher):
         ("f_value", "value"),
     )
 
-    def __init__(self, saved: dict):
+    def __init__(
+        self,
+        saved: dict,
+        use_gpu: bool = False,
+        gpu_device_id: int = 0,
+        slow_batch_size: int = 1024,
+    ):
         self.fast_path_dict: dict = saved["fast_path_dict"]
         self.model = saved["model"]
         self.mlb = saved["mlb"]
         self.encoders: dict = saved["encoders"]
         self.feature_cols: list[str] = saved["feature_cols"]
+        self.use_gpu = use_gpu
+        self.gpu_device_id = gpu_device_id
+        self.slow_batch_size = max(1, int(slow_batch_size))
+        self._class_labels = np.asarray(self.mlb.classes_, dtype=object)
 
         # 预先计算每个编码器的 fallback（第 0 类的编码值，始终为 0）
         self._fallback: dict[str, int] = {col: 0 for col in self.encoders}
@@ -100,12 +111,30 @@ class HybridPrefetcher(BasePrefetcher):
         self._known: dict[str, set] = {
             col: set(le.classes_) for col, le in self.encoders.items()
         }
+        self._configure_inference_device()
 
     @classmethod
     def from_model_path(cls, model_path: str) -> "HybridPrefetcher":
         import joblib
         saved = joblib.load(model_path)
         return cls(saved)
+
+    def _configure_inference_device(self) -> None:
+        """
+        为 LightGBM 子模型设置推理设备。
+        默认 CPU；开启 use_gpu 时尝试切到 GPU。
+        """
+        target = "gpu" if self.use_gpu else "cpu"
+        estimators = getattr(self.model, "estimators_", None)
+        if not estimators:
+            return
+        for est in estimators:
+            if hasattr(est, "set_params"):
+                try:
+                    est.set_params(device=target, gpu_device_id=self.gpu_device_id)
+                except Exception:
+                    # 某些构建环境不支持 GPU 参数，忽略并回退默认设备。
+                    pass
 
     def _encode_row(self, tx: dict) -> dict:
         """将一条交易记录编码为模型所需的特征字典。"""
@@ -126,13 +155,29 @@ class HybridPrefetcher(BasePrefetcher):
     def predict(self, tx: dict) -> list[str]:
         return self.predict_batch([tx])[0]
 
+    def _decode_sparse_predictions(self, pred_sparse) -> list[list[str]]:
+        if hasattr(pred_sparse, "toarray"):
+            arr = pred_sparse.toarray()
+        else:
+            arr = np.asarray(pred_sparse)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        out: list[list[str]] = []
+        for row in arr:
+            idx = np.flatnonzero(row)
+            if idx.size == 0:
+                out.append([])
+                continue
+            out.append(self._class_labels[idx].tolist())
+        return out
+
     def predict_batch(self, txs: list[dict]) -> list[list[str]]:
         if not txs:
             return []
 
         predictions: list[list[str]] = [[] for _ in txs]
         slow_indices: list[int] = []
-        slow_rows: list[dict] = []
+        slow_rows: list[list[int]] = []
 
         for idx, tx in enumerate(txs):
             key = (tx.get("to", ""), tx.get("selector", ""))
@@ -142,14 +187,16 @@ class HybridPrefetcher(BasePrefetcher):
                 continue
             slow_indices.append(idx)
             encoded = self._encode_row(tx)
-            slow_rows.append({col: encoded.get(col, 0) for col in self.feature_cols})
+            slow_rows.append([encoded.get(col, 0) for col in self.feature_cols])
 
         if slow_rows:
-            X = pd.DataFrame(slow_rows, columns=self.feature_cols)
-            pred_sparse = self.model.predict(X)
-            slow_preds = self.mlb.inverse_transform(pred_sparse)
-            for idx, pred in zip(slow_indices, slow_preds):
-                predictions[idx] = list(pred)
+            for start in range(0, len(slow_rows), self.slow_batch_size):
+                end = min(start + self.slow_batch_size, len(slow_rows))
+                X = pd.DataFrame(slow_rows[start:end], columns=self.feature_cols)
+                pred_sparse = self.model.predict(X)
+                slow_preds = self._decode_sparse_predictions(pred_sparse)
+                for idx, pred in zip(slow_indices[start:end], slow_preds):
+                    predictions[idx] = pred
 
         return predictions
 
@@ -162,8 +209,20 @@ class HybridGatedPrefetcher(HybridPrefetcher):
     """
     name = "hybrid_gated"
 
-    def __init__(self, saved: dict, gate_rate: float = 0.1):
-        super().__init__(saved)
+    def __init__(
+        self,
+        saved: dict,
+        gate_rate: float = 0.1,
+        use_gpu: bool = False,
+        gpu_device_id: int = 0,
+        slow_batch_size: int = 1024,
+    ):
+        super().__init__(
+            saved,
+            use_gpu=use_gpu,
+            gpu_device_id=gpu_device_id,
+            slow_batch_size=slow_batch_size,
+        )
         if gate_rate < 0.0 or gate_rate > 1.0:
             raise ValueError(f"gate_rate 必须在 [0, 1]，当前值: {gate_rate}")
         self.gate_rate = float(gate_rate)
@@ -196,7 +255,7 @@ class HybridGatedPrefetcher(HybridPrefetcher):
 
         predictions: list[list[str]] = [[] for _ in txs]
         slow_indices: list[int] = []
-        slow_rows: list[dict] = []
+        slow_rows: list[list[int]] = []
 
         for idx, tx in enumerate(txs):
             key = (tx.get("to", ""), tx.get("selector", ""))
@@ -208,14 +267,16 @@ class HybridGatedPrefetcher(HybridPrefetcher):
                 continue
             slow_indices.append(idx)
             encoded = self._encode_row(tx)
-            slow_rows.append({col: encoded.get(col, 0) for col in self.feature_cols})
+            slow_rows.append([encoded.get(col, 0) for col in self.feature_cols])
 
         if slow_rows:
-            X = pd.DataFrame(slow_rows, columns=self.feature_cols)
-            pred_sparse = self.model.predict(X)
-            slow_preds = self.mlb.inverse_transform(pred_sparse)
-            for idx, pred in zip(slow_indices, slow_preds):
-                predictions[idx] = list(pred)
+            for start in range(0, len(slow_rows), self.slow_batch_size):
+                end = min(start + self.slow_batch_size, len(slow_rows))
+                X = pd.DataFrame(slow_rows[start:end], columns=self.feature_cols)
+                pred_sparse = self.model.predict(X)
+                slow_preds = self._decode_sparse_predictions(pred_sparse)
+                for idx, pred in zip(slow_indices[start:end], slow_preds):
+                    predictions[idx] = pred
 
         return predictions
 
@@ -226,6 +287,9 @@ def make_prefetcher(
     name: str,
     model_path: str | None = None,
     hybrid_gate_rate: float = 0.1,
+    use_gpu: bool = False,
+    gpu_device_id: int = 0,
+    slow_batch_size: int = 1024,
 ) -> BasePrefetcher:
     """
     按名称构建预取器。name 对应 CLI --prefetcher 参数：
@@ -250,6 +314,17 @@ def make_prefetcher(
         if name == "rule":
             return RuleBasePrefetcher(saved["fast_path_dict"])
         if name == "hybrid_gated":
-            return HybridGatedPrefetcher(saved, gate_rate=hybrid_gate_rate)
-        return HybridPrefetcher(saved)
+            return HybridGatedPrefetcher(
+                saved,
+                gate_rate=hybrid_gate_rate,
+                use_gpu=use_gpu,
+                gpu_device_id=gpu_device_id,
+                slow_batch_size=slow_batch_size,
+            )
+        return HybridPrefetcher(
+            saved,
+            use_gpu=use_gpu,
+            gpu_device_id=gpu_device_id,
+            slow_batch_size=slow_batch_size,
+        )
     raise ValueError(f"未知 prefetcher 名称：{name!r}，可选：none/oracle/rule/hybrid/hybrid_gated")
