@@ -50,13 +50,13 @@ Erigon 是 Go 语言实现的完整以太坊客户端，代码量约 50 万行�
 - **一致之处**：块（或伪块）内 first-touch 语义、跨边界缓存重置、先预取再按 `accessed_slots` 顺序计费，与 `intra_block_state` 的**块内首次/重复访问**类比一致。
 - **不一致之处**：伪块边界**不等于**以太坊真实块边界；跨真实块但落在同一伪块内的两条交易，在仿真中会共享块内缓存。因此 Mode A 给出的是**在固定窗口重放假设下的**延迟与加速比，**不声称**与「按真实块重放」数值逐点相同。
 
-### 2.2 Mode B：真块（on-chain block）— 后续可选实现
+### 2.2 Mode B：真块（on-chain block）— ✅ 已实现
 
 **前提**：JSONL 每行至少包含 **`block_number`** 与块内排序字段（建议统一为 **`transaction_index`**，与常见 RPC 命名一致）。
 
 **行为**：`DataLoader.iter_blocks()` 按 `block_number` 分组，组内按 `transaction_index` 排序后依次重放；其余仿真逻辑（`CacheSim`、`PrefetchAPI`、`MetricLog`）与 Mode A 相同。
 
-**工程说明**：Mode B 需在 `data_loader.py` 中增加分支或第二实现类；本计划书**不强制**与 Mode A 同一次交付；若数据采集脚本已补全字段，再单开任务实现并加单元测试即可。
+**当前状态**：Mode B（`--data-mode real_block`）已在 `data_loader.py` 中完全实现，支持 `--block-number-field` 和 `--tx-index-field` 参数配置字段名。全量实验（999 个真实区块，94,463 笔交易）及离线增量管道均运行在 real_block 模式下。
 
 ### 2.3 数据口径：`skip_empty_slots`
 
@@ -291,10 +291,11 @@ python -m simulation.run --sensitivity --model models/evm_model_hybrid_v1.pkl \
 - 扩展 `viz/plot_figures.py` 读取上述 CSV 生成 `fig_sim_*.png`。
 - **验收**：图注中注明 Mode A 伪块与 `skip_empty_slots` 口径。
 
-### 阶段 5：Mode B（可选独立任务）
+### 阶段 5：Mode B（✅ 已完成）
 
-- 实现真块 `DataLoader` + 小规模 JSONL 单测。
-- **验收**：同一小样本在 Mode A/B 下块边界不同时指标差异符合预期说明。
+- `DataLoader` 已实现 real_block 模式，支持按 `block_number` 分组 + `transaction_index` 排序。
+- 全量实验（999 区块）及离线增量管道均在 real_block 下运行。
+- **验收**：Mode A（pseudo_block）与 Mode B（real_block）可通过 `--compare-modes` 对比。
 
 ---
 

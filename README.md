@@ -1,216 +1,115 @@
-# Erigon Transaction Replay & Trace Collector
+# EVM 存储访问预测与混合预取研究
 
-这是一个用于从 Erigon 节点收集特定智能合约（如 Uniswap Router）操作码轨迹（Opcode Traces）的工具。它通过重放历史区块中的交易，统计 SLOAD、SSTORE 等关键指令的执行频率，用于 EVM 存储优化研究。
+基于以太坊主网真实 Trace 数据，研究 EVM 交易级存储槽（slot）访问预测，提出在线/离线职责分离的混合预取架构。在线路径仅执行 O(1) 哈希查表（微秒级），机器学习推理完全剥离为离线增量规则生成任务，在零在线推理开销的前提下持续提升预测覆盖率。
 
-## 🚀 功能特性
+## 项目结构
 
-- **双模式运行**：支持快速 Shell 脚本模式和 Python 高级参数模式。
-- **实时进度显示**：使用 `tqdm` 显示双重进度条（交易收集进度 + 区块扫描进度）。
-- **智能日志管理**：详细日志自动转存至 `logs/`，终端仅显示关键信息（支持 `--verbose` 开启详细输出）。
-- **结构化输出**：结果自动保存为 JSON 格式至 `results/` 目录，便于后续分析。
-- **灵活输入**：支持十进制（`23000000`）和十六进制（`0x16abb73`）区块号。
-- **跳跃式采样**：通过 `--block-interval` 按间隔采样区块，扩大时间跨度同时控制耗时。
+```
+transaction-replay/
+├── README.md                        # 本文件
+├── replay.py                        # 主网交易回放与 trace 采集
+├── run_offline_erigon.sh            # 魔改 Erigon 离线启动脚本
+├── requirements.txt                 # Python 依赖
+├── erigon_tx_trace.jsonl            # 采集产物（~238MB，另获取）
+│
+└── evm_analysis/                    # ★ 核心分析/建模/仿真（主要成果）
+    ├── README.md                    # 详细说明、复现命令、指标口径
+    ├── evm-decision-tree-data.xlsx  # 论文指标源数据
+    │
+    ├── modeling/                    # 模型训练与推理
+    │   ├── train.py                 # 决策树多标签训练（基线）
+    │   ├── train_light_gbm.py       # LightGBM 多标签训练
+    │   ├── train_hybrid.py          # 混合模型训练（快路径+慢路径）
+    │   ├── export_go_model.py       # 模型导出为 Go 代码
+    │   └── load_paper_metrics.py    # xlsx → csv 指标转换
+    │
+    ├── simulation/                  # ★ 仿真平台（核心工程验证）
+    │   ├── run.py                   # CLI 入口（E0–E3 四组实验、敏感性分析等）
+    │   ├── cache_sim.py             # 块内 first-touch 缓存仿真
+    │   ├── data_loader.py           # 数据加载（pseudo / real block）
+    │   ├── prefetch_api.py          # 预取策略接口
+    │   ├── prefetch_executor.py     # 异步预取执行器
+    │   ├── metric_log.py            # 指标收集与聚合
+    │   └── offline_delta.py         # 离线增量管道（Phase B）
+    │
+    ├── analysis/                    # 数据分析与阈值扫描
+    │   ├── slot_distribution_analysis.py   # 规则并集分布（Fig 1a）
+    │   ├── topk_slot_coverage.py           # Top-K 访问覆盖率（Fig 3a）
+    │   └── sweep_hybrid_threshold.py       # 混合阈值扫描（Fig 4a）
+    │
+    ├── viz/                         # 图表生成
+    │   ├── plot_figures.py          # 论文图表（Fig 1–5）
+    │   ├── plot_sim_figures.py      # 仿真图表（Phase A/B）
+    │   └── plot_patent_figures.py   # 专利附图
+    │
+    ├── docs/                        # 文档
+    │   ├── SLOT_DEFINITION.md       # Slot 术语定义
+    │   ├── SEMESTER_PROGRESS_REPORT.md    # 学期进展报告
+    │   ├── MODIFY_NOTE.md           # 项目变更申请
+    │   ├── SIMULATION_PLATFORM_PLAN.md   # 仿真平台工程计划
+    │   ├── PHASE_A_OVERLAP_MODEL.md      # Phase A：执行时间覆盖
+    │   ├── PHASE_B_OFFLINE_DELTA.md      # Phase B：离线增量管道
+    │   └── patent/                  # 专利申请文件（已提交）
+    │
+    ├── models/                      # 训练产物（*.pkl, ~10GB）
+    ├── figures/                     # 图表输出（PNG + 源数据 CSV）
+    └── logs/                        # 仿真运行日志
+```
 
-## 🔧 安装与依赖
+## 核心成果
 
-确保你的环境中安装了 Python 3。推荐安装 `tqdm` 以启用进度条功能：
+### 方法
+**混合预取架构**：快路径 `(to, selector)` 哈希查表（O(1)）+ 慢路径 LightGBM 多标签预测。
+**在线/离线职责分离**：在线仅查表，ML 推理转为离线增量规则生成任务，零在线推理开销。
+
+### 全量实验（999 区块 / 94,463 笔交易）
+
+| 指标 | rule_base | rule_plus_delta | 变化 |
+|---|---|---|---|
+| Recall | 0.2223 | 0.3117 | **+40.2%** |
+| Total Cost | 880,983 µs | 781,405 µs | **−11.3%** |
+| 新增规则 | — | 253 键 / 2,641 slot | — |
+
+缩放一致性：Recall 提升 +27.4% → +35.7% → +40.2%（随数据规模单调递增）。
+
+### 知识产权
+已提交中国发明专利申请：**"基于在线免推理与离线增量生成的以太坊虚拟机存储访问混合预取方法及系统"**（见 `evm_analysis/docs/patent/`）。
+
+## 数据采集（需魔改版 Erigon）
+
+Trace 数据通过 `replay.py` 配合**魔改版 Erigon** 采集。魔改版在 `TraceTx` 函数中埋入 Hook，在执行 `debug_traceTransaction` RPC 时同步输出 `erigon_tx_trace.jsonl`，每条记录包含目标合约地址、函数选择器、代码哈希、调用参数及实际访问的存储槽列表。
 
 ```bash
-pip3 install tqdm requests --user
-# 或者
-pip3 install -r requirements.txt --user
+# 1. 启动魔改版 Erigon（离线模式）
+./run_offline_erigon.sh
+
+# 2. 回放区块，采集 trace
+python3 replay.py 20000000 20001000
 ```
 
-## 📖 快速开始 (Quick Start)
+魔改版 Erigon 仓库需另行获取（与本仓库同级目录 `erigon-upstream/`），改动了 `core/state/intra_block_state.go` 和 `eth/tracers/api.go` 两处，在交易执行路径上插入数据收集逻辑。
 
-### 方式 1：使用快速脚本 (推荐)
+采集完成后，产物 `erigon_tx_trace.jsonl` 作为 `evm_analysis/` 的输入数据。
 
-我们提供了一个封装好的 Shell 脚本 `quick_replay.sh`，适合快速测试。
+## 快速上手
 
 ```bash
-# 赋予执行权限
-chmod +x quick_replay.sh
+# 环境
+cd evm_analysis
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r ../requirements.txt
 
-# 默认运行：扫描最近 10,000 个区块，收集 500 笔交易
-./quick_replay.sh
+# 仿真：四组对照实验（抽样，200 笔）
+python -m simulation.run --all --data-mode real_block --max-txs 200 \
+  --model models/evm_model_hybrid_v1.pkl
 
-# 自定义运行：扫描 50,000 个区块，收集 1,000 笔交易
-./quick_replay.sh 50000 1000
+# 离线增量管道（全量，约 15 分钟）
+python -m simulation.run --offline-delta --data-mode real_block \
+  --model models/evm_model_hybrid_v1.pkl \
+  --delta-split-ratio 0.7 --delta-min-support 2 --delta-max-slots-per-key 20
+
+# 生成论文图表
+python viz/plot_figures.py --all
 ```
 
-### 方式 2：使用 Python 脚本 (高级用法)
-
-直接运行 Python 脚本可以获得完全的控制权（指定 RPC 地址、精确区块范围等）。
-
-**基本用法：**
-
-```bash
-python3 router_trace_collector.py \
-  --rpc http://127.0.0.1:8545 \
-  --start-block 23762019 \
-  --end-block 23772019 \
-  --output my_experiment.json \
-  --max-traces 500
-```
-
-**采样重放（长时间跨度）:**
-
-在 10,000 个区块的范围内，每 100 个区块采 1 个样（用于压力测试缓存局部性）。
-
-```bash
-python3 router_trace_collector.py \
-  --rpc http://127.0.0.1:8545 \
-  --start-block 23780000 \
-  --end-block 23790000 \
-  --block-interval 100 \
-  --output sampled_10k_blocks.json
-```
-
-提示：区块范围为“包含尾区块”。当跨度正好为 10,000 且步长为 100 时，采样区块数为 101。如果你需要严格采样 100 个区块，请将 `--end-block` 设置为 `start_block + 9900`。
-
-**后台运行模式 (无进度条)：**
-
-适合使用 `nohup` 挂机运行大规模任务。
-
-```bash
-nohup python3 router_trace_collector.py \
-  --start-block 23000000 --end-block 23100000 \
-  --max-traces 5000 \
-  --no-progress &
-
-# 查看日志
-tail -f logs/trace.log
-```
-
-### 方式 3：基准测试 (只测 RPC 延迟)
-
-当你想要度量 Erigon 本身的处理速度（去除 Python/脚本开销与启动成本）时，使用 `benchmark_replay.py` 可以精确统计 RPC 请求的纯延迟（服务器处理时间的近似值）。仓库同时提供了 `quick_benchmark.sh` 做为便捷包装，模仿 `quick_replay.sh` 的使用体验。
-
-先确保安装依赖：
-```bash
-pip3 install -r requirements.txt
-```
-
-快速运行（从当前区块开始，回放最近 100 个区块，每块请求 1 次）：
-```bash
-chmod +x quick_benchmark.sh
-./quick_benchmark.sh
-```
-
-示例：对单个区块重复多次以降低波动：
-```bash
-# 单区块（十六进制 0xF42400 = 16000000），重复 10 次
-python3 benchmark_replay.py --rpc http://127.0.0.1:8545 --start-block 0xF42400 --end-block 0xF42400 --repeat 10
-
-# 或使用快速脚本从当前区块向前回放 500 个区块，每块重复 5 次
-./quick_benchmark.sh 500 5
-```
-
-脚本输出包含：
-- `Total RPC Time`：对所有 `session.post()` 调用累计的纯 RPC 耗时（秒）。
-- `Average Latency`：每次 RPC 的平均延迟（毫秒）。
-- `Throughput (TPS)`：基于纯 RPC 时间的吞吐（请求/秒）。
-
-注意事项：
-- 脚本使用 `requests.Session()` 保持 TCP 连接以消除握手开销；在版本对比时请在同一台机器上运行并在切换版本后重启节点以保证环境一致。
-- 推荐将 `--repeat` 设置为 5~20，以减少单次请求波动带来的噪声；也可以对多个区块采样多次然后统计平均值与标准差。
-
-- 进度条：脚本使用 `tqdm` 显示请求进度（默认开启），可通过 `--no-progress` 关闭进度条显示。
-
-
-## ⚙️ 参数说明
-
-| 参数               | 缩写 | 说明                                         | 默认值                            |
-| ------------------ | ---- | -------------------------------------------- | --------------------------------- |
-| `--rpc`            |      | Erigon 节点的 RPC 地址                       | `http://127.0.0.1:8545`           |
-| `--start-block`    |      | 开始区块高度 (支持 hex/dec)                  | 最新区块 - 1000                   |
-| `--end-block`      |      | 结束区块高度 (支持 hex/dec)                  | 最新区块                          |
-| `--output`         | `-o` | 结果文件名 (自动存入 `results/`)             | `router_opcodes_{timestamp}.json` |
-| `--max-traces`     | `-m` | 收集达到此交易数量后停止                     | 100                               |
-| `--verbose`        | `-v` | 在终端显示详细日志                           | False                             |
-| `--no-progress`    |      | 禁用进度条 (适合日志重定向)                  | False                             |
-| `--block-interval` |      | 采样区块间隔（100 表示每 100 个区块采 1 个） | 1                                 |
-
-## 📂 输出文件结构
-
-### 1. 结果文件 (`results/*.json`)
-
-生成的 JSON 包含元数据、单笔交易详情和聚合统计：
-
-```json
-{
-  "range": {
-    "startBlock": 23762019,
-    "endBlock": 23772019
-  },
-  "contracts": {
-    "0x881d40237659c251811cec9c364ef91dc08d300c": "Metamask Swap Router"
-  },
-  "aggregate": {
-    "Metamask Swap Router": {
-      "SLOAD": 4250,
-      "SSTORE": 1391,
-      "tx_count": 50
-    }
-  },
-  "transactions": [
-    {
-      "txHash": "0x...",
-      "blockNumber": 23762019,
-      "target": "Metamask Swap Router",
-      "opcodeCounts": {
-        "PUSH1": 757,
-        "SLOAD": 64,
-        "SSTORE": 21
-      }
-    }
-  ]
-}
-```
-
-### 2. 日志文件 (`logs/trace.log`)
-
-所有详细的调试信息、错误堆栈和单笔交易捕获记录都会保存在这里。
-
-## 📊 性能参考
-
-在本地 Erigon 节点上的大概运行速度：
-
-| 区块范围 | 收集交易数 | 预计耗时 | 输出大小 |
-| -------- | ---------- | -------- | -------- |
-| 100      | ~10        | < 5 秒   | 50 KB    |
-| 10,000   | 500        | ~25 秒   | 1.2 MB   |
-| 100,000  | 2000       | 2-3 分钟 | 5 MB     |
-
-## 🛠 故障排查
-
-**Q: 提示 "Connection refused" 或无法连接 RPC**
-> 检查 Erigon 是否已在离线模式启动，并且 `--http` 端口配置正确。
-> ```bash
-> # 测试连接
-> curl -X POST http://127.0.0.1:8545 \
->   -H "Content-Type: application/json" \
->   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
-> ```
-
-**Q: 脚本权限不足**
-> ```bash
-> chmod +x quick_replay.sh
-> ```
-
-**Q: SSH 终端里进度条乱码**
-> 尝试添加 `--no-progress` 参数运行，或检查终端的 UTF-8 支持。
-
-## 💡 数据分析技巧 (jq)
-
-使用 `jq` 命令行工具快速分析 `results/` 下的 JSON 文件：
-
-**1. 统计特定合约的交易数：**
-```bash
-cat results/result.json | jq '.transactions[] | select(.target == "1inch Aggregation Router V6")'
-```
-
-**2. 找出 SLOAD 消耗最多的前 5 笔交易：**
-```bash
-cat results/result.json | jq '.transactions | sort_by(.opcodeCounts.SLOAD) | reverse | .[0:5]'
-```
+详细命令及参数说明见 [`evm_analysis/README.md`](evm_analysis/README.md)。
