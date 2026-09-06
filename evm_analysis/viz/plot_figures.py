@@ -32,40 +32,42 @@ def _ensure_out():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _savefig(fig, stem: str):
+    """Save figure as both PNG (quick preview) and PDF (LaTeX)."""
+    for ext in ["png", "pdf"]:
+        path = OUT_DIR / f"{stem}.{ext}"
+        fig.savefig(path, dpi=150 if ext == "png" else 300, bbox_inches="tight")
+        print(f"Wrote {path}")
+
+
 def plot_figure1a_union_cdf(csv_path: Path | None = None) -> Path | None:
-    """Train-only union size ECDF: unweighted (rules) vs weighted (by train tx count)."""
+    """Training-only union size ECDF: unweighted (each pattern key) vs weighted (by training tx count)."""
     path = csv_path or DATA_DIR / 'figure1_train_union_keys.csv'
     if not path.is_file():
         print(f"Skip fig1a: missing {path}")
         return None
     df = pd.read_csv(path)
     sizes = df['union_size'].values.astype(float)
-    w = df['train_tx_count'].values.astype(float)
 
     order = np.argsort(sizes)
     x = sizes[order]
-    w_sorted = w[order]
-    y_w = np.cumsum(w_sorted) / w_sorted.sum() if w_sorted.sum() > 0 else np.zeros_like(x)
 
     x_u = np.sort(sizes)
     y_u = np.arange(1, len(x_u) + 1, dtype=float) / len(x_u)
 
     _ensure_out()
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    ax.plot(x_u, y_u, label='Unweighted (each rule)', color='#1f77b4')
-    ax.plot(x, y_w, label='Weighted by train tx count per rule', color='#ff7f0e')
-    ax.set_xlabel('Train union size (distinct slots per (to, selector))')
-    ax.set_ylabel('CDF')
-    ax.set_title('Fig 1a: Slot union size (hybrid-aligned train split)')
-    ax.legend()
+    fig, ax = plt.subplots(figsize=(7.5, 3.5))
+    ax.plot(x_u, y_u, label='Union size per pattern key', color='#2C4A6E', linewidth=1.5, marker='^', markevery=0.05, markersize=5, markerfacecolor='white')
+    ax.set_xlabel('Union size per pattern key (to, selector)', fontsize=13)
+    ax.set_ylabel('CDF', fontsize=13)
+    ax.tick_params(axis='both', labelsize=12)
+    ax.legend(fontsize=12)
     ax.grid(True, alpha=0.3)
     ax.set_xscale('symlog', linthresh=10)
-    out = OUT_DIR / 'fig1a_slot_union_cdf.png'
     fig.tight_layout()
-    fig.savefig(out, dpi=150)
+    _savefig(fig, 'fig_cdf')
     plt.close(fig)
-    print(f"Wrote {out}")
-    return out
+    return OUT_DIR / 'fig_cdf.pdf'
 
 
 def plot_figure2_merged(merged_csv: Path | None = None) -> list[Path]:
@@ -118,12 +120,10 @@ def plot_figure2_merged(merged_csv: Path | None = None) -> list[Path]:
         ax.set_title('Fig 2a: Feature comparison (k=1000, strategy=default)')
         ax.legend(fontsize=8, ncol=2)
         ax.grid(True, axis='y', alpha=0.3)
-        p = OUT_DIR / 'fig2a_feature_compare.png'
         fig.tight_layout()
-        fig.savefig(p, dpi=150)
+        _savefig(fig, 'fig2a_feature_compare')
         plt.close(fig)
-        out_paths.append(p)
-        print(f"Wrote {p}")
+        out_paths.append(OUT_DIR / 'fig2a_feature_compare.pdf')
 
     # 2b: same features + k; n sweep
     sub1 = df[
@@ -144,12 +144,10 @@ def plot_figure2_merged(merged_csv: Path | None = None) -> list[Path]:
         ax.set_title('Fig 2b: n sweep (k=1000, full features, max strategy)')
         ax.legend(fontsize=7, loc='best')
         ax.grid(True, alpha=0.3)
-        p = OUT_DIR / 'fig2b_n_sweep.png'
         fig.tight_layout()
-        fig.savefig(p, dpi=150)
+        _savefig(fig, 'fig2b_n_sweep')
         plt.close(fig)
-        out_paths.append(p)
-        print(f"Wrote {p}")
+        out_paths.append(OUT_DIR / 'fig2b_n_sweep.pdf')
 
     # 2d: DT (Sheet2) vs LightGBM (Sheet3), k=1000, n=10, max strategy, full features
     sub = df[
@@ -174,12 +172,10 @@ def plot_figure2_merged(merged_csv: Path | None = None) -> list[Path]:
         ax.set_title('Fig 2d: DT vs LightGBM (k=1000, n=10, max strategy, full features)')
         ax.legend()
         ax.grid(True, axis='y', alpha=0.3)
-        p = OUT_DIR / 'fig2d_model_compare_bar.png'
         fig.tight_layout()
-        fig.savefig(p, dpi=150)
+        _savefig(fig, 'fig2d_model_compare_bar')
         plt.close(fig)
-        out_paths.append(p)
-        print(f"Wrote {p}")
+        out_paths.append(OUT_DIR / 'fig2d_model_compare_bar.pdf')
 
     # 2c: K sweep using DEFAULT strategy (precision trend is clearer/monotonic in this view)
     sub2 = df[
@@ -200,12 +196,10 @@ def plot_figure2_merged(merged_csv: Path | None = None) -> list[Path]:
         ax.set_title('Fig 2c: k sweep (label matrix, default strategy)')
         ax.legend(fontsize=7, loc='best')
         ax.grid(True, alpha=0.3)
-        p = OUT_DIR / 'fig2c_k_sweep.png'
         fig.tight_layout()
-        fig.savefig(p, dpi=150)
+        _savefig(fig, 'fig2c_k_sweep')
         plt.close(fig)
-        out_paths.append(p)
-        print(f"Wrote {p}")
+        out_paths.append(OUT_DIR / 'fig2c_k_sweep.pdf')
 
     return out_paths
 
@@ -226,12 +220,10 @@ def plot_figure3_topk(csv_path: Path | None = None) -> Path | None:
     ax.set_ylabel('Access-mass coverage (%)')
     ax.set_title('Fig 3a: Top-K vs share of slot accesses (full data)')
     ax.grid(True, alpha=0.3)
-    p = OUT_DIR / 'fig3a_topk_access_mass.png'
     fig.tight_layout()
-    fig.savefig(p, dpi=150)
+    _savefig(fig, 'fig3a_topk_access_mass')
     plt.close(fig)
-    print(f"Wrote {p}")
-    return p
+    return OUT_DIR / 'fig3a_topk_access_mass.pdf'
 
 
 def plot_figure4_hybrid(csv_path: Path | None = None) -> Path | None:
@@ -259,12 +251,10 @@ def plot_figure4_hybrid(csv_path: Path | None = None) -> Path | None:
     ax2.plot(x, df['fast_path_tx_fraction'] * 100.0, '^--', color='gray', alpha=0.7, label='Fast-path tx %')
     ax2.set_ylabel('Fast-path tx %', color='gray')
 
-    p = OUT_DIR / 'fig4a_hybrid_pareto.png'
     fig.tight_layout()
-    fig.savefig(p, dpi=150)
+    _savefig(fig, 'fig4a_hybrid_pareto')
     plt.close(fig)
-    print(f"Wrote {p}")
-    return p
+    return OUT_DIR / 'fig4a_hybrid_pareto.pdf'
 
 
 def plot_figure5_latency(csv_path: Path | None = None) -> Path | None:

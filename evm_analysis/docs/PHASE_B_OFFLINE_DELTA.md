@@ -32,7 +32,7 @@ Phase A 已证实 online hybrid slow-path 预测开销（百秒级）与执行�
 ### CLI 新增（`simulation/run.py`）
 
 - `--offline-delta` — 启动离线增量管道
-- `--delta-split-ratio` — Window A/B 切分比例（默认 0.8）
+- `--delta-split-ratio` — Window A/B 切分比例（默认 0.7）
 - `--delta-min-support` — 候选 slot 最小支持次数（默认 2）
 - `--delta-max-slots-per-key` — 每键最多新增 slot 数（默认不限制）
 

@@ -1,11 +1,11 @@
 """
 预取策略接口层。
 
-提供四种预取器，对应计划书中的 E0–E3 实验组：
-  NoPrefetcher    (E0) 无预取基线
-  OraclePrefetcher(E1) 理想上界（知道真实 accessed_slots）
-  RuleBasePrefetcher(E2) 仅 fast_path_dict 查表
-  HybridPrefetcher  (E3) 完整混合模型（查表 + LightGBM 慢路径）
+提供四种预取器，对应论文中的实验组：
+  NoPrefetcher      (E0) 无预取基线
+  OraclePrefetcher  (E1) 理想上界（知道真实 accessed_slots）
+  TablePrefetcher   (E2) 仅 pattern_table 查表
+  MLPrefetcher      (离线增量生成) pattern_table + LightGBM 离线路径
 
 所有 Prefetcher 只暴露一个方法：predict(tx: dict) -> list[str]
 """
@@ -53,30 +53,30 @@ class OraclePrefetcher(BasePrefetcher):
         return list(set(tx.get("accessed_slots", [])))
 
 
-# ── E2：规则查表（fast_path_dict 单独贡献） ─────────────────────────────────
+# ── E2：Hash Table 查表 ─────────────────────────────────────────────────────
 
-class RuleBasePrefetcher(BasePrefetcher):
-    """仅使用 fast_path_dict，不调用 ML 模型。"""
-    name = "rule"
+class TablePrefetcher(BasePrefetcher):
+    """仅使用 pattern_table 查表，不调用 ML 模型。"""
+    name = "table"
 
-    def __init__(self, fast_path_dict: dict[tuple, list[str]]):
-        self.fast_path_dict = fast_path_dict
+    def __init__(self, pattern_table: dict[tuple, list[str]]):
+        self.pattern_table = pattern_table
 
     def predict(self, tx: dict) -> list[str]:
         key = (tx.get("to", ""), tx.get("selector", ""))
-        return self.fast_path_dict.get(key, [])
+        return self.pattern_table.get(key, [])
 
 
-# ── E3：混合预取器（fast_path_dict + LightGBM 慢路径） ──────────────────────
+# ── ML 预取器（pattern_table + LightGBM 离线路径） ─────────────────────────
 
-class HybridPrefetcher(BasePrefetcher):
+class MLPrefetcher(BasePrefetcher):
     """
-    复用 evm_model_hybrid_v1.pkl 中保存的 fast_path_dict + LightGBM 模型。
+    复用 evm_model_hybrid_v1.pkl 中保存的 pattern_table + LightGBM 模型。
     推理逻辑与 modeling/predict_hybrid.py 保持一致，但为仿真场景做了适配：
       - 对 JSONL 中缺失的字段（input_param_2/3、from、value）自动填充空串
       - 未知 label 值使用 encoder 第 0 类作为 fallback
     """
-    name = "hybrid"
+    name = "ml"
     _FIELD_MAP = (
         ("f_to", "to"),
         ("f_code_hash", "code_hash"),
@@ -93,16 +93,16 @@ class HybridPrefetcher(BasePrefetcher):
         saved: dict,
         use_gpu: bool = False,
         gpu_device_id: int = 0,
-        slow_batch_size: int = 1024,
+        offline_batch_size: int = 1024,
     ):
-        self.fast_path_dict: dict = saved["fast_path_dict"]
+        self.pattern_table: dict = saved["fast_path_dict"]  # pickle 中 key 暂时保留原名
         self.model = saved["model"]
         self.mlb = saved["mlb"]
         self.encoders: dict = saved["encoders"]
         self.feature_cols: list[str] = saved["feature_cols"]
         self.use_gpu = use_gpu
         self.gpu_device_id = gpu_device_id
-        self.slow_batch_size = max(1, int(slow_batch_size))
+        self.offline_batch_size = max(1, int(offline_batch_size))
         self._class_labels = np.asarray(self.mlb.classes_, dtype=object)
 
         # 预先计算每个编码器的 fallback（第 0 类的编码值，始终为 0）
@@ -114,7 +114,7 @@ class HybridPrefetcher(BasePrefetcher):
         self._configure_inference_device()
 
     @classmethod
-    def from_model_path(cls, model_path: str) -> "HybridPrefetcher":
+    def from_model_path(cls, model_path: str) -> "MLPrefetcher":
         import joblib
         saved = joblib.load(model_path)
         return cls(saved)
@@ -176,38 +176,38 @@ class HybridPrefetcher(BasePrefetcher):
             return []
 
         predictions: list[list[str]] = [[] for _ in txs]
-        slow_indices: list[int] = []
-        slow_rows: list[list[int]] = []
+        offline_indices: list[int] = []
+        offline_rows: list[list[int]] = []
 
         for idx, tx in enumerate(txs):
             key = (tx.get("to", ""), tx.get("selector", ""))
-            fast = self.fast_path_dict.get(key)
-            if fast is not None:
-                predictions[idx] = fast
+            cached = self.pattern_table.get(key)
+            if cached is not None:
+                predictions[idx] = cached
                 continue
-            slow_indices.append(idx)
+            offline_indices.append(idx)
             encoded = self._encode_row(tx)
-            slow_rows.append([encoded.get(col, 0) for col in self.feature_cols])
+            offline_rows.append([encoded.get(col, 0) for col in self.feature_cols])
 
-        if slow_rows:
-            for start in range(0, len(slow_rows), self.slow_batch_size):
-                end = min(start + self.slow_batch_size, len(slow_rows))
-                X = pd.DataFrame(slow_rows[start:end], columns=self.feature_cols)
+        if offline_rows:
+            for start in range(0, len(offline_rows), self.offline_batch_size):
+                end = min(start + self.offline_batch_size, len(offline_rows))
+                X = pd.DataFrame(offline_rows[start:end], columns=self.feature_cols)
                 pred_sparse = self.model.predict(X)
-                slow_preds = self._decode_sparse_predictions(pred_sparse)
-                for idx, pred in zip(slow_indices[start:end], slow_preds):
+                offline_preds = self._decode_sparse_predictions(pred_sparse)
+                for idx, pred in zip(offline_indices[start:end], offline_preds):
                     predictions[idx] = pred
 
         return predictions
 
 
-class HybridGatedPrefetcher(HybridPrefetcher):
+class MLGatedPrefetcher(MLPrefetcher):
     """
-    Hybrid 的低风险变体：
-    - fast-path 始终保留；
-    - slow-path 仅按 gate_rate 触发，降低模型推理开销。
+    MLPrefetcher 的低风险变体：
+    - pattern_table 始终保留；
+    - 离线路径仅按 gate_rate 触发，降低模型推理开销。
     """
-    name = "hybrid_gated"
+    name = "ml_gated"
 
     def __init__(
         self,
@@ -215,19 +215,19 @@ class HybridGatedPrefetcher(HybridPrefetcher):
         gate_rate: float = 0.1,
         use_gpu: bool = False,
         gpu_device_id: int = 0,
-        slow_batch_size: int = 1024,
+        offline_batch_size: int = 1024,
     ):
         super().__init__(
             saved,
             use_gpu=use_gpu,
             gpu_device_id=gpu_device_id,
-            slow_batch_size=slow_batch_size,
+            offline_batch_size=offline_batch_size,
         )
         if gate_rate < 0.0 or gate_rate > 1.0:
             raise ValueError(f"gate_rate 必须在 [0, 1]，当前值: {gate_rate}")
         self.gate_rate = float(gate_rate)
 
-    def _should_run_slow_path(self, tx: dict) -> bool:
+    def _should_run_offline_path(self, tx: dict) -> bool:
         """
         使用稳定哈希做采样门控，保证同一交易特征在多次实验中决策一致。
         """
@@ -254,28 +254,28 @@ class HybridGatedPrefetcher(HybridPrefetcher):
             return []
 
         predictions: list[list[str]] = [[] for _ in txs]
-        slow_indices: list[int] = []
-        slow_rows: list[list[int]] = []
+        offline_indices: list[int] = []
+        offline_rows: list[list[int]] = []
 
         for idx, tx in enumerate(txs):
             key = (tx.get("to", ""), tx.get("selector", ""))
-            fast = self.fast_path_dict.get(key)
-            if fast is not None:
-                predictions[idx] = fast
+            cached = self.pattern_table.get(key)
+            if cached is not None:
+                predictions[idx] = cached
                 continue
-            if not self._should_run_slow_path(tx):
+            if not self._should_run_offline_path(tx):
                 continue
-            slow_indices.append(idx)
+            offline_indices.append(idx)
             encoded = self._encode_row(tx)
-            slow_rows.append([encoded.get(col, 0) for col in self.feature_cols])
+            offline_rows.append([encoded.get(col, 0) for col in self.feature_cols])
 
-        if slow_rows:
-            for start in range(0, len(slow_rows), self.slow_batch_size):
-                end = min(start + self.slow_batch_size, len(slow_rows))
-                X = pd.DataFrame(slow_rows[start:end], columns=self.feature_cols)
+        if offline_rows:
+            for start in range(0, len(offline_rows), self.offline_batch_size):
+                end = min(start + self.offline_batch_size, len(offline_rows))
+                X = pd.DataFrame(offline_rows[start:end], columns=self.feature_cols)
                 pred_sparse = self.model.predict(X)
-                slow_preds = self._decode_sparse_predictions(pred_sparse)
-                for idx, pred in zip(slow_indices[start:end], slow_preds):
+                offline_preds = self._decode_sparse_predictions(pred_sparse)
+                for idx, pred in zip(offline_indices[start:end], offline_preds):
                     predictions[idx] = pred
 
         return predictions
@@ -286,45 +286,45 @@ class HybridGatedPrefetcher(HybridPrefetcher):
 def make_prefetcher(
     name: str,
     model_path: str | None = None,
-    hybrid_gate_rate: float = 0.1,
+    ml_gate_rate: float = 0.1,
     use_gpu: bool = False,
     gpu_device_id: int = 0,
-    slow_batch_size: int = 1024,
+    offline_batch_size: int = 1024,
 ) -> BasePrefetcher:
     """
     按名称构建预取器。name 对应 CLI --prefetcher 参数：
-      none / oracle / rule / hybrid / hybrid_gated
-    rule/hybrid/hybrid_gated 都需要 model_path 指向 evm_model_hybrid_v1.pkl。
+      none / oracle / table / ml / ml_gated
+    table/ml/ml_gated 都需要 model_path 指向 evm_model_hybrid_v1.pkl。
     """
     if name == "none":
         return NoPrefetcher()
     if name == "oracle":
         return OraclePrefetcher()
-    if name in ("rule", "hybrid", "hybrid_gated"):
+    if name in ("table", "ml", "ml_gated"):
         if not model_path or not Path(model_path).exists():
             raise FileNotFoundError(
                 f"--model 路径不存在或未指定（当前值：{model_path!r}），"
-                "rule/hybrid/hybrid_gated 预取器需要 evm_model_hybrid_v1.pkl"
+                "table/ml/ml_gated 预取器需要 evm_model_hybrid_v1.pkl"
             )
         saved = _MODEL_CACHE.get(model_path)
         if saved is None:
             import joblib
             saved = joblib.load(model_path)
             _MODEL_CACHE[model_path] = saved
-        if name == "rule":
-            return RuleBasePrefetcher(saved["fast_path_dict"])
-        if name == "hybrid_gated":
-            return HybridGatedPrefetcher(
+        if name == "table":
+            return TablePrefetcher(saved["fast_path_dict"])
+        if name == "ml_gated":
+            return MLGatedPrefetcher(
                 saved,
-                gate_rate=hybrid_gate_rate,
+                gate_rate=ml_gate_rate,
                 use_gpu=use_gpu,
                 gpu_device_id=gpu_device_id,
-                slow_batch_size=slow_batch_size,
+                offline_batch_size=offline_batch_size,
             )
-        return HybridPrefetcher(
+        return MLPrefetcher(
             saved,
             use_gpu=use_gpu,
             gpu_device_id=gpu_device_id,
-            slow_batch_size=slow_batch_size,
+            offline_batch_size=offline_batch_size,
         )
-    raise ValueError(f"未知 prefetcher 名称：{name!r}，可选：none/oracle/rule/hybrid/hybrid_gated")
+    raise ValueError(f"未知 prefetcher 名称：{name!r}，可选：none/oracle/table/ml/ml_gated")

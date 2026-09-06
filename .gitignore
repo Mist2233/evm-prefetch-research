@@ -11,3 +11,5 @@ erigon-target
 *.xlsx
 
 .claude/
+measurement/
+paper/references/

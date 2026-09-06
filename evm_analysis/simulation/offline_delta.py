@@ -1,17 +1,17 @@
 """
-离线增量管道：hybrid slow-path 离线补充 fast-path 规则。
+离线增量管道：ML 离线路径补充 pattern_table。
 
 管线：
-  1. 按 block_number 切分 Window A/B
-  2. Window A：识别 rule_miss 交易，用 hybrid 预测，累积正确 slot 计数
+  1. 按 block_number 切分 training_window / eval_window
+  2. training_window：识别 table_miss 交易，用 MLPrefetcher 预测，累积正确 slot 计数
   3. 按 min_support / max_new_slots_per_key 过滤
-  4. 合并 delta 到 fast_path_dict
-  5. Window B：rule_base vs rule_plus_delta 仿真对比
+  4. 合并 delta 到 pattern_table
+  5. eval_window：original vs augmented 仿真对比
 
 用法：
   python -m simulation.run --offline-delta \
     --model models/evm_model_hybrid_v1.pkl \
-    --delta-split-ratio 0.8 --delta-min-support 2
+    --delta-split-ratio 0.7 --delta-min-support 2
 """
 
 from __future__ import annotations
@@ -23,13 +23,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from simulation.prefetch_api import HybridPrefetcher, RuleBasePrefetcher, make_prefetcher
+from simulation.prefetch_api import MLPrefetcher, TablePrefetcher, make_prefetcher
 from simulation.run import run_simulation
 
 
 def split_by_block(
     jsonl_path: str,
-    split_ratio: float = 0.8,
+    split_ratio: float = 0.7,
     max_txs: int | None = None,
 ) -> tuple[list[dict], list[dict], dict]:
     """
@@ -82,46 +82,46 @@ def split_by_block(
 
 def generate_candidates(
     txs: list[dict],
-    hybrid_prefetcher: HybridPrefetcher,
-    fast_path_dict: dict,
+    ml_prefetcher: MLPrefetcher,
+    pattern_table: dict,
     verbose: bool = True,
 ) -> dict[tuple, dict[str, int]]:
     """
-    在 Window A 上为 rule_miss 交易生成候选增量。
+    在 training_window 上为 table_miss 交易生成候选增量。
 
-    对每笔 (to, selector) 不在 fast_path_dict 中的交易：
-      - 调用 hybrid 预测
+    对每笔 (to, selector) 不在 pattern_table 中的交易：
+      - 调用 MLPrefetcher 预测
       - 取 predicted ∩ accessed_slots
       - 按 (to, selector) 键累加各 slot 的正确次数
 
     Returns:
         {(to, selector): {slot: correct_count}}
     """
-    # 分离 rule_hit 和 rule_miss
-    rule_miss_indices: list[int] = []
-    rule_miss_txs: list[dict] = []
+    # 分离 table_hit 和 table_miss
+    table_miss_indices: list[int] = []
+    table_miss_txs: list[dict] = []
     for idx, tx in enumerate(txs):
         key = (tx.get("to", ""), tx.get("selector", ""))
-        if key not in fast_path_dict:
-            rule_miss_indices.append(idx)
-            rule_miss_txs.append(tx)
+        if key not in pattern_table:
+            table_miss_indices.append(idx)
+            table_miss_txs.append(tx)
 
     if verbose:
-        print(f"  Window A 总交易: {len(txs)}, rule_miss: {len(rule_miss_txs)} "
-              f"({len(rule_miss_txs)/max(len(txs),1)*100:.1f}%)")
+        print(f"  训练窗口总交易: {len(txs)}, table_miss: {len(table_miss_txs)} "
+              f"({len(table_miss_txs)/max(len(txs),1)*100:.1f}%)")
 
-    if not rule_miss_txs:
+    if not table_miss_txs:
         return {}
 
-    # 逐批预测（复用 HybridPrefetcher.predict_batch 的批处理）
+    # 逐批预测（复用 MLPrefetcher.predict_batch 的批处理）
     candidates: dict[tuple, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    batch_size = hybrid_prefetcher.slow_batch_size
-    total = len(rule_miss_txs)
+    batch_size = ml_prefetcher.offline_batch_size
+    total = len(table_miss_txs)
 
     for start in range(0, total, batch_size):
         end = min(start + batch_size, total)
-        batch_txs = rule_miss_txs[start:end]
-        predictions = hybrid_prefetcher.predict_batch(batch_txs)
+        batch_txs = table_miss_txs[start:end]
+        predictions = ml_prefetcher.predict_batch(batch_txs)
 
         for tx, preds in zip(batch_txs, predictions):
             key = (tx.get("to", ""), tx.get("selector", ""))
@@ -182,11 +182,11 @@ def filter_candidates(
 
 
 def merge_delta(
-    fast_path_dict: dict[tuple, list[str]],
+    pattern_table: dict[tuple, list[str]],
     delta: dict[tuple, list[str]],
 ) -> dict[tuple, list[str]]:
-    """合并 delta 到 fast_path_dict，返回新 dict（不修改原 dict）。"""
-    merged = {k: list(v) for k, v in fast_path_dict.items()}
+    """合并 delta 到 pattern_table，返回新 dict（不修改原 dict）。"""
+    merged = {k: list(v) for k, v in pattern_table.items()}
     new_keys = 0
     new_slots = 0
     existing_added = 0
@@ -206,7 +206,7 @@ def merge_delta(
 
     print(f"  合并完成: 新增 {new_keys} 个键, {new_slots} slots; "
           f"已有键补充 {existing_added} slots; "
-          f"dict {len(fast_path_dict)} → {len(merged)} 键")
+          f"dict {len(pattern_table)} → {len(merged)} 键")
     return merged
 
 
@@ -271,13 +271,13 @@ def run_offline_delta_pipeline(
     tx_index_field: str = "transaction_index",
     t_hit_ns: float = 30.0,
     t_miss_us: float = 3.0,
-    split_ratio: float = 0.8,
+    split_ratio: float = 0.7,
     min_support: int = 2,
     max_new_slots_per_key: int | None = None,
     output_dir: str = "figures/data",
     use_gpu: bool = False,
     gpu_device_id: int = 0,
-    slow_batch_size: int = 1024,
+    offline_batch_size: int = 1024,
     quiet: bool = False,
 ) -> None:
     """
@@ -294,39 +294,39 @@ def run_offline_delta_pipeline(
     if verbose:
         print("\n[1/5] 加载模型...")
     saved = __import__("joblib").load(model_path)
-    fast_path_dict: dict = saved["fast_path_dict"]
+    pattern_table: dict = saved["fast_path_dict"]
 
-    # 2. 切分 Window A / B
+    # 2. 切分训练/评估窗口
     if verbose:
-        print("[2/5] 切分 Window A / B...")
-    window_a, window_b, split_stats = split_by_block(
+        print("[2/5] 切分训练/评估窗口...")
+    training_window, eval_window, split_stats = split_by_block(
         data_path, split_ratio=split_ratio, max_txs=max_txs,
     )
-    print(f"  Window A: {split_stats['window_a_blocks']} 块, "
+    print(f"  训练窗口: {split_stats['window_a_blocks']} 块, "
           f"{split_stats['window_a_txs']} 笔交易")
-    print(f"  Window B: {split_stats['window_b_blocks']} 块, "
+    print(f"  评估窗口: {split_stats['window_b_blocks']} 块, "
           f"{split_stats['window_b_txs']} 笔交易")
 
-    if not window_a or not window_b:
-        print("  错误: Window A 或 B 为空，请调整 split_ratio 或增加 max_txs")
+    if not training_window or not eval_window:
+        print("  错误: 训练或评估窗口为空，请调整 split_ratio 或增加 max_txs")
         return
 
     # 3. 生成候选增量
     if verbose:
-        print("[3/5] Window A 生成候选增量...")
-    hybrid = HybridPrefetcher(
+        print("[3/5] 训练窗口生成候选增量...")
+    ml_prefetcher = MLPrefetcher(
         saved, use_gpu=use_gpu, gpu_device_id=gpu_device_id,
-        slow_batch_size=slow_batch_size,
+        offline_batch_size=offline_batch_size,
     )
-    candidates = generate_candidates(window_a, hybrid, fast_path_dict, verbose=verbose)
+    candidates = generate_candidates(training_window, ml_prefetcher, pattern_table, verbose=verbose)
 
     # 4. 过滤并合并
     if verbose:
         print("[4/5] 过滤并合并 delta...")
     filtered = filter_candidates(candidates, min_support=min_support,
                                  max_new_slots_per_key=max_new_slots_per_key)
-    augmented_dict = merge_delta(fast_path_dict, filtered)
-    delta_stats = compute_delta_stats(fast_path_dict, augmented_dict, filtered)
+    augmented_dict = merge_delta(pattern_table, filtered)
+    delta_stats = compute_delta_stats(pattern_table, augmented_dict, filtered)
 
     # 保存 delta stats
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -338,11 +338,11 @@ def run_offline_delta_pipeline(
         writer.writerow(stats_row)
     print(f"  Delta stats 已保存至: {stats_path}")
 
-    # 5. Window B 评估
+    # 5. 评估窗口对比
     if verbose:
-        print("[5/5] Window B 评估 (rule_base vs rule_plus_delta)...")
+        print("[5/5] 评估窗口对比 (original vs augmented)...")
 
-    tmp_path = _write_temp_jsonl(window_b)
+    tmp_path = _write_temp_jsonl(eval_window)
     try:
         # 覆盖 max_txs/max_blocks 避免二次限制（已在 split 阶段控制）
         common = dict(
@@ -357,42 +357,42 @@ def run_offline_delta_pipeline(
             t_miss_us=t_miss_us,
         )
 
-        rule_base = run_simulation(
-            RuleBasePrefetcher(fast_path_dict),
+        original_result = run_simulation(
+            TablePrefetcher(pattern_table),
             verbose=False, **common,
         )
-        rule_delta = run_simulation(
-            RuleBasePrefetcher(augmented_dict),
+        augmented_result = run_simulation(
+            TablePrefetcher(augmented_dict),
             verbose=False, **common,
         )
 
         # 构建评估行
         eval_row = {
-            "prefetcher": "rule_base",
-            "n_tx": rule_base.n_tx,
-            "n_blocks": rule_base.n_blocks,
-            "recall": round(rule_base.recall, 4),
-            "precision": round(rule_base.precision, 4),
-            "total_cost_us": round(rule_base.total_cost_us, 2),
-            "n_miss_prevented": rule_base.n_miss_prevented,
-            "n_would_be_miss": rule_base.n_would_be_miss,
-            "predict_overhead_us": round(rule_base.predict_overhead_us, 2),
+            "prefetcher": "original_table",
+            "n_tx": original_result.n_tx,
+            "n_blocks": original_result.n_blocks,
+            "recall": round(original_result.recall, 4),
+            "precision": round(original_result.precision, 4),
+            "total_cost_us": round(original_result.total_cost_us, 2),
+            "n_miss_prevented": original_result.n_miss_prevented,
+            "n_would_be_miss": original_result.n_would_be_miss,
+            "predict_overhead_us": round(original_result.predict_overhead_us, 2),
         }
         eval_row2 = {
-            "prefetcher": "rule_plus_delta",
-            "n_tx": rule_delta.n_tx,
-            "n_blocks": rule_delta.n_blocks,
-            "recall": round(rule_delta.recall, 4),
-            "precision": round(rule_delta.precision, 4),
-            "total_cost_us": round(rule_delta.total_cost_us, 2),
-            "n_miss_prevented": rule_delta.n_miss_prevented,
-            "n_would_be_miss": rule_delta.n_would_be_miss,
-            "predict_overhead_us": round(rule_delta.predict_overhead_us, 2),
+            "prefetcher": "augmented_table",
+            "n_tx": augmented_result.n_tx,
+            "n_blocks": augmented_result.n_blocks,
+            "recall": round(augmented_result.recall, 4),
+            "precision": round(augmented_result.precision, 4),
+            "total_cost_us": round(augmented_result.total_cost_us, 2),
+            "n_miss_prevented": augmented_result.n_miss_prevented,
+            "n_would_be_miss": augmented_result.n_would_be_miss,
+            "predict_overhead_us": round(augmented_result.predict_overhead_us, 2),
         }
 
         # 计算 delta 带来的变化
-        recall_delta = rule_delta.recall - rule_base.recall
-        cost_delta_us = rule_base.total_cost_us - rule_delta.total_cost_us
+        recall_delta = augmented_result.recall - original_result.recall
+        cost_delta_us = original_result.total_cost_us - augmented_result.total_cost_us
         eval_row["recall_delta"] = round(recall_delta, 4)
         eval_row["cost_delta_us"] = round(cost_delta_us, 2)
         eval_row2["recall_delta"] = ""
@@ -407,13 +407,13 @@ def run_offline_delta_pipeline(
         print(f"  Eval 结果已保存至: {eval_path}")
 
         # 打印对比
-        print(f"\n  {'':<18} {'rule_base':>12} {'rule_delta':>12} {'变化':>12}")
-        print(f"  {'Recall':<18} {rule_base.recall:>12.4f} {rule_delta.recall:>12.4f} "
+        print(f"\n  {'':<18} {'original_table':>14} {'augmented_table':>16} {'变化':>12}")
+        print(f"  {'Recall':<18} {original_result.recall:>14.4f} {augmented_result.recall:>16.4f} "
               f"{recall_delta:>+12.4f}")
-        print(f"  {'Precision':<18} {rule_base.precision:>12.4f} {rule_delta.precision:>12.4f}")
-        print(f"  {'Total Cost (µs)':<18} {rule_base.total_cost_us:>12.0f} {rule_delta.total_cost_us:>12.0f} "
+        print(f"  {'Precision':<18} {original_result.precision:>14.4f} {augmented_result.precision:>16.4f}")
+        print(f"  {'Total Cost (µs)':<18} {original_result.total_cost_us:>14.0f} {augmented_result.total_cost_us:>16.0f} "
               f"{-cost_delta_us:>+12.0f}")
-        print(f"  {'Miss Prevented':<18} {rule_base.n_miss_prevented:>12} {rule_delta.n_miss_prevented:>12}")
+        print(f"  {'Miss Prevented':<18} {original_result.n_miss_prevented:>14} {augmented_result.n_miss_prevented:>16}")
 
         if recall_delta > 0 or cost_delta_us > 0:
             print(f"\n  ✓ delta 带来正向收益")

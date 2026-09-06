@@ -1,0 +1,295 @@
+% ============================================================
+% References for "Split-Path ML-Augmented Prefetching" (NAS 2026)
+% Total: 28 entries
+% Entry types: 
+%
+% Each entry includes a % URL: comment linking to the source
+% for advisor verification. Entries that are themselves URLs
+% (EIPs, arXiv, Uniswap, GitHub) do not have a separate link.
+%
+% NOTE: Scholar-sourced entries updated 2026-07-14.
+% Conference booktitles abbreviated per advisor's convention.
+% ============================================================
+
+% --- EVM Optimization & Storage ---
+
+@article{storage_replica,
+  author  = {Jezek, Kamil and Jeong, Seongho and Kim, Yeonsoo and Scholz, Bernhard and Burgstaller, Bernd},
+  title   = {Storage Replica: Accelerating the Storage Access of the Ethereum Virtual Machine},
+  journal = {Applied Sciences},
+  volume  = {16},
+  number  = {1},
+  pages   = {1--26},
+  year    = {2026},
+  doi     = {10.3390/app16010486},
+}
+% URL: https://doi.org/10.3390/app16010486
+
+@article{evmtracer,
+  author  = {Hu, Xiaowen and Burgstaller, Bernd and Scholz, Bernhard},
+  title   = {{EVMTracer}: Dynamic Analysis of the Parallelization and Redundancy Potential in the Ethereum Virtual Machine},
+  journal = {IEEE Access},
+  volume  = {11},
+  pages   = {47159--47178},
+  year    = {2023},
+  doi     = {10.1109/ACCESS.2023.3267277},
+}
+% URL: https://doi.org/10.1109/ACCESS.2023.3267277
+
+@misc{eip7707,
+  author       = {Adams, Ben and Iakushkin, Oleg},
+  title        = {{EIP-7707}: Incentivize Access List Provisioning},
+  howpublished = {Ethereum Improvement Proposal},
+  year         = {2024},
+}
+% (EIP — see eips.ethereum.org)
+
+@misc{eip2930,
+  author       = {V. Buterin and M. H. Swende},
+  title        = {{EIP-2930}: Optional Access Lists},
+  howpublished = {Ethereum Improvement Proposal, included in Berlin hard fork},
+  year         = {2020},
+}
+% (EIP — see eips.ethereum.org)
+
+@misc{eip7650,
+  author       = {Q. Zhou and Z. Xu},
+  title        = {{EIP-7650}: Programmable Access Lists},
+  howpublished = {Ethereum Improvement Proposal},
+  year         = {2024},
+}
+% (EIP — see eips.ethereum.org)
+
+@misc{eip7863,
+  author       = {T. Wahrst\"{a}tter and J. Brouwer and A. Stokes and A. Dietrichs and Y. Weiss and A. Forshtat},
+  title        = {{EIP-7863}: Block-level Warming},
+  howpublished = {Ethereum Improvement Proposal},
+  year         = {2025},
+}
+% (EIP — see eips.ethereum.org)
+
+@misc{reddio,
+  author = {Qi, Xiaodong and Chen, Xinran and Asiy and Han, Neil},
+  title  = {Boosting Blockchain Throughput: Parallel {EVM} Execution with Asynchronous Storage for {Reddio}},
+  year   = {2025},
+  note   = {arXiv:2503.04595},
+}
+% URL: https://arxiv.org/abs/2503.04595
+
+@inproceedings{ostm,
+  author    = {Anjana, Parwat Singh and Attiya, Hagit and Kumari, Sweta and Peri, Sathya and Somani, Archit},
+  title     = {Efficient Concurrent Execution of Smart Contracts in Blockchains using Object-based Transactional Memory},
+  booktitle = {Proc. Int'l Conf. Networked Systems (NETYS)},
+  pages     = {77--93},
+  year      = {2020},
+  publisher = {Springer},
+  series    = {LNCS},
+  volume    = {12129},
+}
+% URL: https://doi.org/10.1007/978-3-030-67087-0_6
+% arXiv preprint: https://arxiv.org/abs/1904.00358
+
+@inproceedings{needless_writes,
+  author    = {Albert, Elvira and Correas, Jes{\'u}s and Gordillo, Pablo and Rom{\'a}n-D{\'\i}ez, Guillermo and Rubio, Albert},
+  title     = {Inferring Needless Write Memory Accesses on Ethereum Bytecode},
+  booktitle = {Proc. TACAS},
+  pages     = {448--466},
+  year      = {2023},
+  publisher = {Springer},
+  series    = {LNCS},
+  volume    = {13993},
+  doi       = {10.1007/978-3-031-30823-9_23},
+}
+% URL: https://doi.org/10.1007/978-3-031-30823-9_23
+
+@article{evmshield,
+  author  = {Zhang, Xiaoli and Sun, Wenxiang and Xu, Zhicheng and Cheng, Hongbing and Cai, Chengjun and Cui, Helei and Li, Qi},
+  title   = {{EVM-Shield}: In-Contract State Access Control for Fast Vulnerability Detection and Prevention},
+  journal = {IEEE Trans. Inf. Forensics Security},
+  volume  = {19},
+  pages   = {2517--2532},
+  year    = {2024},
+  doi     = {10.1109/TIFS.2024.3349852},
+}
+% URL: https://doi.org/10.1109/TIFS.2024.3349852
+
+@inproceedings{conflict_spec,
+  author    = {Anjana, Parwat Singh and Amini, Matin and Kapoor, Rohit and Parmar, Rahul and Ramesh, Raghavendra and Ravi, Srivatsan and Tobkin, Joshua},
+  title     = {Efficient Parallel Execution of Blockchain Transactions Leveraging Conflict Specifications},
+  booktitle = {Proc. Conf. Advances in Financial Technologies (AFT)},
+  year      = {2025},
+  pages     = {1--26},
+  publisher = {Schloss Dagstuhl -- Leibniz-Zentrum f{\"u}r Informatik},
+  series    = {LIPIcs},
+  volume    = {354},
+  doi       = {10.4230/LIPIcs.AFT.2025.29},
+}
+% URL: https://doi.org/10.4230/LIPIcs.AFT.2025.29
+
+% --- ML-based Prefetching ---
+
+@inproceedings{voyager,
+  author    = {Shi, Zhan and Jain, Akanksha and Swersky, Kevin and Hashemi, Milad and Ranganathan, Parthasarathy and Lin, Calvin},
+  title     = {A Hierarchical Neural Model of Data Prefetching},
+  booktitle = {Proc. ACM ASPLOS},
+  pages     = {861--873},
+  year      = {2021},
+  doi       = {10.1145/3445814.3446752},
+}
+% URL: https://doi.org/10.1145/3445814.3446752
+
+@inproceedings{efficient_neural,
+  author    = {Liu, Yuchen and Tziantzioulis, Georgios and Wentzlaff, David},
+  title     = {Building Efficient Neural Prefetcher},
+  booktitle = {Proc. ACM MEMSYS},
+  pages     = {1--12},
+  year      = {2023},
+  doi       = {10.1145/3631882.3631903},
+}
+
+@inproceedings{pythia,
+  author    = {Bera, Rahul and Kanellopoulos, Konstantinos and Nori, Anant and Shahroodi, Taha and Subramoney, Sreenivas and Mutlu, Onur},
+  title     = {{Pythia}: A Customizable Hardware Prefetching Framework Using Online Reinforcement Learning},
+  booktitle = {Proc. IEEE/ACM MICRO},
+  pages     = {1121--1137},
+  year      = {2021},
+  doi       = {10.1145/3466752.3480114},
+}
+% URL: https://doi.org/10.1145/3466752.3480114
+
+@article{rlcopref,
+  author  = {Yang, Huijing and Fang, Juan and Su, Xing and Cai, Zhi and Wang, Yuening},
+  title   = {{RL-CoPref}: A Reinforcement Learning-Based Coordinated Prefetching Controller for Multiple Prefetchers},
+  journal = {J. Supercomputing},
+  volume  = {80},
+  number  = {9},
+  pages   = {13001--13026},
+  year    = {2024},
+  doi     = {10.1007/s11227-024-05938-9},
+}
+% URL: https://doi.org/10.1007/s11227-024-05938-9
+
+@misc{farsight,
+  author = {Huang, Yutong and Guo, Zhiyuan and Zhang, Yiying},
+  title  = {Learning Semantics, Not Addresses: Runtime Neural Prefetching for Far Memory},
+  year   = {2025},
+  note   = {arXiv:2506.00384},
+}
+% URL: https://arxiv.org/abs/2506.00384
+
+@article{a2p,
+  author  = {Zhang, Pengmiao and Kannan, Rajgopal and Nori, Anant V and Prasanna, Viktor K},
+  title   = {Accelerating Graph Analytics Using Attention-Based Data Prefetcher},
+  journal = {SN Computer Science},
+  volume  = {5},
+  number  = {5},
+  pages   = {646},
+  year    = {2024},
+  doi     = {10.1007/s42979-024-02989-w},
+}
+% URL: https://doi.org/10.1007/s42979-024-02989-w
+
+% --- General Prefetching ---
+
+@book{primer_prefetch,
+  author    = {Falsafi, Babak and Wenisch, Thomas F},
+  title     = {A Primer on Hardware Prefetching},
+  publisher = {Morgan \& Claypool},
+  year      = {2014},
+  series    = {Synthesis Lectures on Computer Architecture},
+}
+% URL: https://doi.org/10.2200/S00581ED1V01Y201405CAC028
+
+@misc{survey_prefetch,
+  author = {Manohar, Sheel Sindhu},
+  title  = {Toward Intelligent Prefetching: A Survey on Complex Memory Access Prediction Techniques},
+  year   = {2026},
+  note   = {arXiv:2606.09955},
+}
+% URL: https://arxiv.org/abs/2606.09955
+
+@inproceedings{markov_prefetch,
+  author    = {Joseph, Doug and Grunwald, Dirk},
+  title     = {Prefetching Using {Markov} Predictors},
+  booktitle = {Proc. ACM/IEEE ISCA},
+  pages     = {252--263},
+  year      = {1997},
+}
+% URL: https://doi.org/10.1145/264107.264207
+
+% --- Learned Indexes ---
+
+@inproceedings{alex,
+  author    = {Ding, Jialin and Minhas, Umar Farooq and Yu, Jia and Wang, Chi and Do, Jaeyoung and Li, Yinan and Zhang, Hantian and Chandramouli, Badrish and Gehrke, Johannes and Kossmann, Donald and Lomet, David and Kraska, Tim},
+  title     = {{ALEX}: An Updatable Adaptive Learned Index},
+  booktitle = {Proc. ACM SIGMOD},
+  pages     = {969--984},
+  year      = {2020},
+}
+% URL: https://doi.org/10.1145/3318464.3389711
+
+@article{pgm,
+  author  = {Ferragina, Paolo and Vinciguerra, Giorgio},
+  title   = {The {PGM-index}: A Fully-Dynamic Compressed Learned Index with Provable Worst-Case Bounds},
+  journal = {Proc. VLDB Endowment},
+  volume  = {13},
+  number  = {8},
+  pages   = {1162--1175},
+  year    = {2020},
+}
+% URL: https://doi.org/10.14778/3389133.3389135
+
+@inproceedings{radixspline,
+  author    = {Kipf, Andreas and Marcus, Ryan and van Renen, Alexander and Stoian, Mihail and Kemper, Alfons and Kraska, Tim and Neumann, Thomas},
+  title     = {{RadixSpline}: A Single-Pass Learned Index},
+  booktitle = {Proc. ACM aiDM@SIGMOD},
+  pages     = {1--5},
+  year      = {2020},
+}
+% URL: https://doi.org/10.1145/3401071.3401659
+
+@inproceedings{shifttable,
+  author    = {Hadian, Ali and Heinis, Thomas},
+  title     = {Shift-Table: A Low-latency Learned Index for Range Queries using Model Correction},
+  booktitle = {Proc. Int'l Conf. Extending Database Technology (EDBT)},
+  pages     = {253--264},
+  year      = {2021},
+}
+% URL: https://doi.org/10.5441/002/edbt.2021.23
+
+% --- NAS Conference Papers ---
+
+@inproceedings{nas_paper_1,
+  author    = {Kong, Lijuan and Mei, Fei and Zhu, Chunjie and Cheng, Wen and Zeng, Lingfang},
+  title     = {{DeepFetch}: A Node-Aware Greedy Fetch System for Distributed Cache of Deep Learning Applications},
+  booktitle = {Proc. IEEE NAS},
+  pages     = {1--8},
+  year      = {2024},
+  doi       = {10.1109/NAS63802.2024.10781369},
+}
+% URL: https://doi.org/10.1109/NAS63802.2024.10781369
+
+@inproceedings{nas_paper_2,
+  author    = {Ruan, Xiaojun and Jiang, Xunfei and Chen, Haiquan},
+  title     = {Cached Mapping Table Prefetching for Random Reads in Solid-State Drives},
+  booktitle = {Proc. IEEE NAS},
+  pages     = {1--6},
+  year      = {2021},
+  doi       = {10.1109/NAS51552.2021.9605397},
+}
+% URL: https://doi.org/10.1109/NAS51552.2021.9605397
+
+% --- Technical Reports and Repositories ---
+
+@misc{uniswapv2,
+  author = {H. Adams and N. Zinsmeister and D. Robinson},
+  title  = {Uniswap V2 Core},
+  year   = {2020},
+  note   = {\url{https://uniswap.org/whitepaper.pdf}},
+}
+
+@misc{erigon,
+  author = {{Erigon Team}},
+  title  = {Erigon: Ethereum Execution Layer Client},
+  note   = {\url{https://github.com/erigontech/erigon}},
+}

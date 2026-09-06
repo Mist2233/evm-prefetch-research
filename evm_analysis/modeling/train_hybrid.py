@@ -12,7 +12,7 @@ from sklearn.multioutput import MultiOutputClassifier
 DATA_PATH = '/home/tianyumao/workspace/transaction-replay/erigon_tx_trace.jsonl'
 MODEL_DIR = '/home/tianyumao/workspace/transaction-replay/evm_analysis/models'
 RANDOM_STATE = 42
-FAST_PATH_THRESHOLD = 152  # 95% of (to, selector) fall under this
+UNION_SIZE_THRESHOLD = 152  # 95% of (to, selector) fall under this
 TOP_K_SLOTS = 1000
 
 def load_data(path):
@@ -29,7 +29,7 @@ def calc_metrics(y_t, y_p):
     total_pred = sum(len(set(p)) for p in y_p)
     total_hit = sum(len(set(t).intersection(set(p))) for t, p in zip(y_t, y_p))
     exact_matches = sum(1 for t, p in zip(y_t, y_p) if set(t) == set(p))
-    
+
     recall = total_hit / total_true if total_true > 0 else 0
     precision = total_hit / total_pred if total_pred > 0 else 0
     em = exact_matches / len(y_t) if len(y_t) > 0 else 0
@@ -38,7 +38,7 @@ def calc_metrics(y_t, y_p):
 def main():
     print("Loading Transactions In...")
     df = load_data(DATA_PATH)
-    
+
     for col in ['to', 'code_hash', 'selector', 'input_param_1', 'input_param_2', 'input_param_3', 'from', 'value']:
         if col not in df.columns:
             df[col] = ''
@@ -57,50 +57,50 @@ def main():
         encoders[col] = le
 
     feature_cols = ['f_to', 'f_selector', 'f_input_param_1', 'f_input_param_2', 'f_input_param_3', 'f_code_hash', 'f_from', 'f_value']
-    
-    # 2. Train/Test Split (crucial to split BEFORE building the fast path dict to avoid data leakage)
+
+    # 2. Train/Test Split
     df_train, df_test = train_test_split(df, test_size=0.2, random_state=RANDOM_STATE)
     print(f"Train size: {len(df_train)}, Test size: {len(df_test)}")
 
-    # 3. Build Fast Path Profiler (Hash Map)
-    print("\nProfiling Fast Path (Hash Map)...")
+    # 3. Build Pattern Table (Hash Map)
+    print("\nBuilding Pattern Table (Hash Map)...")
     to_sel_slots = defaultdict(set)
     for _, row in df_train.iterrows():
         to_sel_slots[(row['to'], row['selector'])].update(row['accessed_slots'])
-    
-    fast_path_dict = {}
-    slow_path_keys = set()
+
+    pattern_table = {}
+    offline_keys = set()
     for k, v in to_sel_slots.items():
-        if len(v) <= FAST_PATH_THRESHOLD:
-            fast_path_dict[k] = list(v)
+        if len(v) <= UNION_SIZE_THRESHOLD:
+            pattern_table[k] = list(v)
         else:
-            slow_path_keys.add(k)
-    
-    print(f"Fast Path rules generated: {len(fast_path_dict)} (Simple Contracts)")
-    print(f"Slow Path rules generated: {len(slow_path_keys)} (Complex Contracts)")
+            offline_keys.add(k)
 
-    # 4. Prepare Slow Path Data for LightGBM
-    df_train_slow = df_train[df_train.apply(lambda x: (x['to'], x['selector']) in slow_path_keys, axis=1)]
-    print(f"\nSlow Path Training Samples: {len(df_train_slow)}")
+    print(f"Pattern table entries: {len(pattern_table)} (simple pattern keys)")
+    print(f"Offline-route keys: {len(offline_keys)} (complex pattern keys)")
 
-    # Extract Top K slots strictly from the slow path training data
+    # 4. Prepare Offline Path Data for LightGBM
+    df_train_offline = df_train[df_train.apply(lambda x: (x['to'], x['selector']) in offline_keys, axis=1)]
+    print(f"\nOffline Path Training Samples: {len(df_train_offline)}")
+
+    # Extract Top K slots strictly from the offline path training data
     slot_counts = defaultdict(int)
-    for slots in df_train_slow['accessed_slots']:
+    for slots in df_train_offline['accessed_slots']:
         for s in slots:
             slot_counts[s] += 1
     top_slots = set([s for s, _ in sorted(slot_counts.items(), key=lambda x: x[1], reverse=True)[:TOP_K_SLOTS]])
-    
-    # Filter targets to only top K slots for the ML model
-    df_train_slow_y = df_train_slow['accessed_slots'].apply(lambda slots: [s for s in slots if s in top_slots])
-    
-    mlb = MultiLabelBinarizer(classes=list(top_slots))
-    y_train_slow = mlb.fit_transform(df_train_slow_y)
-    X_train_slow = df_train_slow[feature_cols]
 
-    # 5. Train Slow Path Model (LightGBM)
-    print("Training Slow Path Model (LightGBM)...")
+    # Filter targets to only top K slots for the ML model
+    df_train_offline_y = df_train_offline['accessed_slots'].apply(lambda slots: [s for s in slots if s in top_slots])
+
+    mlb = MultiLabelBinarizer(classes=list(top_slots))
+    y_train_offline = mlb.fit_transform(df_train_offline_y)
+    X_train_offline = df_train_offline[feature_cols]
+
+    # 5. Train Classification Model (LightGBM)
+    print("Training Classification Model (LightGBM)...")
     base_lgbm = LGBMClassifier(
-        n_estimators=30,      # Small estimator count for fast execution and prototyping
+        n_estimators=30,
         learning_rate=0.1,
         max_depth=10,
         random_state=RANDOM_STATE,
@@ -108,11 +108,11 @@ def main():
         verbose=-1
     )
     model = MultiOutputClassifier(base_lgbm, n_jobs=4)
-    model.fit(X_train_slow, y_train_slow)
+    model.fit(X_train_offline, y_train_offline)
 
-    # Save Hybrid Model
+    # Save Model
     save_data = {
-        'fast_path_dict': fast_path_dict,
+        'fast_path_dict': pattern_table,  # pickle key kept for backward compatibility
         'model': model,
         'mlb': mlb,
         'encoders': encoders,
@@ -120,47 +120,47 @@ def main():
     }
     os.makedirs(MODEL_DIR, exist_ok=True)
     joblib.dump(save_data, os.path.join(MODEL_DIR, 'evm_model_hybrid_v1.pkl'))
-    print("\nHybrid model saved successfully!")
+    print("\nModel saved successfully!")
 
-    # 6. Evaluate Unified Predictor on Test Set
-    print("\nEvaluating Unified Predictor on Test Set...")
-    is_fast_test = df_test.apply(lambda x: (x['to'], x['selector']) in fast_path_dict, axis=1)
-    
-    df_test_fast = df_test[is_fast_test].copy()
-    df_test_slow = df_test[~is_fast_test].copy()
-    
-    # Fast Path Inference (O(1) Table Lookup)
-    fast_preds = df_test_fast.apply(lambda x: fast_path_dict[(x['to'], x['selector'])], axis=1).tolist()
-    
-    # Slow Path Inference (LightGBM Prediction)
-    if len(df_test_slow) > 0:
-        X_test_slow = df_test_slow[feature_cols]
-        ml_preds_sparse = model.predict(X_test_slow)
-        slow_preds = list(mlb.inverse_transform(ml_preds_sparse))
+    # 6. Evaluate on Test Set
+    print("\nEvaluating on Test Set...")
+    is_table_hit = df_test.apply(lambda x: (x['to'], x['selector']) in pattern_table, axis=1)
+
+    df_test_hit = df_test[is_table_hit].copy()
+    df_test_miss = df_test[~is_table_hit].copy()
+
+    # Online Path (Hash Table Lookup)
+    table_preds = df_test_hit.apply(lambda x: pattern_table[(x['to'], x['selector'])], axis=1).tolist()
+
+    # Offline Path (LightGBM Prediction)
+    if len(df_test_miss) > 0:
+        X_test_offline = df_test_miss[feature_cols]
+        ml_preds_sparse = model.predict(X_test_offline)
+        offline_preds = list(mlb.inverse_transform(ml_preds_sparse))
     else:
-        slow_preds = []
-        
-    y_true_fast = df_test_fast['accessed_slots'].tolist()
-    y_true_slow = df_test_slow['accessed_slots'].tolist()
-    
-    rec_f, prec_f, em_f = calc_metrics(y_true_fast, fast_preds)
-    rec_s, prec_s, em_s = calc_metrics(y_true_slow, slow_preds)
-    rec_all, prec_all, em_all = calc_metrics(y_true_fast + y_true_slow, fast_preds + slow_preds)
+        offline_preds = []
+
+    y_true_hit = df_test_hit['accessed_slots'].tolist()
+    y_true_miss = df_test_miss['accessed_slots'].tolist()
+
+    rec_hit, prec_hit, em_hit = calc_metrics(y_true_hit, table_preds)
+    rec_miss, prec_miss, em_miss = calc_metrics(y_true_miss, offline_preds)
+    rec_all, prec_all, em_all = calc_metrics(y_true_hit + y_true_miss, table_preds + offline_preds)
 
     print("\n" + "="*40)
-    print("=== Hybrid Model Evaluation ===")
+    print("=== Model Evaluation ===")
     print("="*40)
-    print(f"Test Set Data Routed to Fast Path: {len(y_true_fast) / len(df_test):.2%}")
+    print(f"Test Set Data Routed to Online Path: {len(y_true_hit) / len(df_test):.2%}")
     print("-" * 40)
-    print(f"1. Fast Path (Hash Map) - {len(y_true_fast)} txs")
-    print(f"   Recall:    {rec_f:.2%}")
-    print(f"   Precision: {prec_f:.2%}")
-    print(f"   Exact M:   {em_f:.2%}")
+    print(f"1. Online Path (Hash Map) - {len(y_true_hit)} txs")
+    print(f"   Recall:    {rec_hit:.2%}")
+    print(f"   Precision: {prec_hit:.2%}")
+    print(f"   Exact M:   {em_hit:.2%}")
     print("-" * 40)
-    print(f"2. Slow Path (LightGBM) - {len(y_true_slow)} txs")
-    print(f"   Recall:    {rec_s:.2%}")
-    print(f"   Precision: {prec_s:.2%}")
-    print(f"   Exact M:   {em_s:.2%}")
+    print(f"2. Offline Path (LightGBM) - {len(y_true_miss)} txs")
+    print(f"   Recall:    {rec_miss:.2%}")
+    print(f"   Precision: {prec_miss:.2%}")
+    print(f"   Exact M:   {em_miss:.2%}")
     print("-" * 40)
     print(f"3. Overall Unified System - {len(df_test)} txs")
     print(f"   Recall:    {rec_all:.2%}")

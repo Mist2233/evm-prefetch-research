@@ -1,0 +1,25 @@
+% =====================================================================
+% internship/preamble.tex
+% 实习周记统一模板的共用导言区。各周文件在 \documentclass 之后用
+%   \input{../preamble.tex}
+% 引入本文件，正文前用 \weekhead{周次}{时间}{主题} 输出抬头。
+% 编译命令：xelatex weekN.tex
+% =====================================================================
+
+\usepackage[a4paper,top=2.6cm,bottom=2.6cm,left=2.8cm,right=2.8cm]{geometry}
+\usepackage{booktabs}   % 表格横线，week3 的结果对比表会用到
+\usepackage{array}
+
+% 周记抬头：\weekhead{周次}{时间区间}{本周主题}
+\newcommand{\weekhead}[3]{%
+\begin{center}
+{\zihao{3}\bfseries 实习周记（#1）}\\[10pt]
+{\zihao{-4}姓名：【姓名】\qquad 学号：【学号】}\\[4pt]
+{\zihao{-4}时间：#2}\\[4pt]
+{\zihao{-4}主题：#3}
+\end{center}
+\vspace{2pt}
+\hrule height 0.8pt
+\vspace{10pt}
+\zihao{-4}%
+}
